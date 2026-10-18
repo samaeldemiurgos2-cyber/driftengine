@@ -983,7 +983,16 @@ export const FLOORS = {
    * reflection mixed to its place's light +2,918. A renderer cannot shake any of it out, since the
    * passes that fog and the lit stage name it.
    */
-  'core-only': 973830,
+  /*
+   * **Raised 2026-10-18 by +15,811, 1.6%, for 4.14.0, with every `core-*` entry by about as much**,
+   * attributed by measuring `core-only` at each of the release's commits: a point skin rewritten in
+   * part +501; the medium's sky fill in a colour of its own +83; a glow moved and masked by its
+   * material, a lit switch, +2,225; the iridescent overlay +4,096; decals laid into the base colour
+   * +5,757; and WebGL2's motion pass for its temporal resolve +3,149. The switches cost their
+   * generated WGSL in the lit stage whether a scene turns them on or not, which is where most of it
+   * lies. `nav-only` and `tools-only` moved by a byte each with the core modules they share.
+   */
+  'core-only': 989641,
   /**
    * **The gizmo, 2026-09-03: 4,642 bytes over core, which is 4.53 KB gzipped.**
    *
@@ -1011,7 +1020,7 @@ export const FLOORS = {
   /* Raised 2026-10-12 with `core-only`, for 4.13.3. */
   /* Raised 2026-10-12 with `core-only`, for 4.13.4. */
   /* Raised 2026-10-12 with `core-only`, for 4.13.5. */
-  'core-and-gizmo': 978732,
+  'core-and-gizmo': 994734,
   /**
    * **A skinned cloth, 2026-10-05: 14,393 bytes over core, paid only by a game that imports it.**
    *
@@ -1032,7 +1041,7 @@ export const FLOORS = {
   /* Raised 2026-10-12 with `core-only`, for 4.13.3. */
   /* Raised 2026-10-12 with `core-only`, for 4.13.4. */
   /* Raised 2026-10-12 with `core-only`, for 4.13.5. */
-  'core-and-cloth': 991431,
+  'core-and-cloth': 1007099,
   /*
    * Both carry the same drift as `core-only` — they are that bundle plus a package — and both sat
    * at 2.9% of their old floors, which is inside the tolerance and one commit from outside it. A
@@ -1060,7 +1069,7 @@ export const FLOORS = {
   /* Raised 2026-10-12 with `core-only`, for 4.13.3. */
   /* Raised 2026-10-12 with `core-only`, for 4.13.4. */
   /* Raised 2026-10-12 with `core-only`, for 4.13.5. */
-  'core-and-audio': 980204,
+  'core-and-audio': 995937,
   /*
    * **`@driftengine/splats`, measured 2026-08-25 on the commit that published it.** Core alone is
    * 524,402 and this is 536,676, so the whole package — two readers, the packing, the counting
@@ -1097,7 +1106,7 @@ export const FLOORS = {
   /* Raised 2026-10-12 with `core-only`, for 4.13.3. */
   /* Raised 2026-10-12 with `core-only`, for 4.13.4. */
   /* Raised 2026-10-12 with `core-only`, for 4.13.5. */
-  'core-and-animation': 980027,
+  'core-and-animation': 996132,
   /*
    * **The four floors below moved with core rather than on their own account, 2026-08-25.** Each
    * is that bundle plus a package, so core's +5,342 for Track A is in every one of them — and each
@@ -1147,7 +1156,7 @@ export const FLOORS = {
   /* Raised 2026-10-12 with `core-only`, for 4.13.3. */
   /* Raised 2026-10-12 with `core-only`, for 4.13.4. */
   /* Raised 2026-10-12 with `core-only`, for 4.13.5. */
-  'core-and-script': 1015332,
+  'core-and-script': 1031227,
   /*
    * **`@driftengine/texture`, measured on the commit that published it.** Standalone, like
    * `drft-only` and `entities-only`: the package imports no renderer, so this is the whole of what
@@ -1230,7 +1239,7 @@ export const FLOORS = {
   /* Lowered 2026-10-11 by one byte, esbuild's output for an unchanged graph. */
   /* Moved 2026-10-12 by one byte, esbuild's output for an unchanged graph. */
   /* Lowered 2026-10-12 by a byte, for 4.13.5. */
-  'nav-only': 9051,
+  'nav-only': 9052,
   /*
    * **The whole argument of Wave 5B Task 7, as a number.** The inspector, the console, the
    * profiler and the network panel, plus the command stack that makes their edits undoable — the
@@ -1268,7 +1277,7 @@ export const FLOORS = {
    */
   /* Moved 2026-10-12 by one byte, esbuild's output for an unchanged graph. */
   /* Lowered 2026-10-12 by a byte, for 4.13.5. */
-  'tools-only': 5781,
+  'tools-only': 5782,
   /*
    * **`@driftengine/capture` as it first ships: one model's definition.** Depth Anything 3's
    * backbone, head and camera decoder as functions of their weights, the rotary and positional
@@ -1357,7 +1366,7 @@ export const FLOORS = {
   /* Raised 2026-10-12 with `core-only`, for 4.13.3. */
   /* Raised 2026-10-12 with `core-only`, for 4.13.4. */
   /* Raised 2026-10-12 with `core-only`, for 4.13.5. */
-  'core-and-splats': 991470,
+  'core-and-splats': 1007272,
   /*
    * **Measured 2026-09-02, on the commit that published `@driftengine/terrain`.** Core alone is
    * 629,614 and this is the first number beside it, so the difference is the whole package: a
@@ -1389,7 +1398,7 @@ export const FLOORS = {
   /* Raised 2026-10-12 with `core-only`, for 4.13.3. */
   /* Raised 2026-10-12 with `core-only`, for 4.13.4. */
   /* Raised 2026-10-12 with `core-only`, for 4.13.5. */
-  'core-and-terrain': 975217,
+  'core-and-terrain': 990969,
   /**
    * **The 2D layer: 8.7 KB gzipped over core**, and it sits where Track D's price table says it
    * should.
@@ -1434,7 +1443,7 @@ export const FLOORS = {
   /* Raised 2026-10-12 with `core-only`, for 4.13.3. */
   /* Raised 2026-10-12 with `core-only`, for 4.13.4. */
   /* Raised 2026-10-12 with `core-only`, for 4.13.5. */
-  'core-and-ui2d': 984570,
+  'core-and-ui2d': 1000469,
   /* Lowered 2026-09-30 twice with `core-only`: the generated WGSL stores each shared item once. */
   /*
    * Raised 2026-10-01 by +7,689: `core-only`'s 4,725, and 2,740 that predates it — the loader's
@@ -1454,7 +1463,7 @@ export const FLOORS = {
   /* Raised 2026-10-12 with `core-only`, for 4.13.3. */
   /* Raised 2026-10-12 with `core-only`, for 4.13.4. */
   /* Raised 2026-10-12 with `core-only`, for 4.13.5. */
-  'core-and-assets': 1003248,
+  'core-and-assets': 1019127,
   /**
    * **What placing a sound in the world costs, published rather than hidden.**
    *
@@ -1480,7 +1489,7 @@ export const FLOORS = {
   /* Raised 2026-10-12 with `core-only`, for 4.13.3. */
   /* Raised 2026-10-12 with `core-only`, for 4.13.4. */
   /* Raised 2026-10-12 with `core-only`, for 4.13.5. */
-  'core-audio-spatial': 982391,
+  'core-audio-spatial': 998034,
   /**
    * **The entity model with no engine at all: 632 bytes gzipped.**
    *

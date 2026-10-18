@@ -8,7 +8,7 @@
  * for every resource a later write in the frame overwrites. A skin posed twice in a frame draws its
  * last pose everywhere, as a mesh rewritten twice with `updateMesh` does.
  */
-import { reachOf, type PointSkinData, type PointSkinReach } from '../../pointSkin.ts';
+import { reachOf, widenReach, type PointSkinData, type PointSkinReach } from '../../pointSkin.ts';
 import type { GpuMesh } from './buffers.ts';
 import { POINT_SKIN_WGSL, POINT_SKIN_WORKGROUP } from './shaders/pointSkin.wgsl.ts';
 
@@ -30,12 +30,20 @@ export function createPointSkinPipeline(device: GPUDevice): GPUComputePipeline {
 
 export class GpuPointSkin {
   readonly mesh: GpuMesh;
-  readonly reach: PointSkinReach;
+  /** Widened by each rewrite, never narrowed: see `widenReach`. */
+  reach: PointSkinReach;
   private readonly count: number;
   private readonly pipeline: GPUComputePipeline;
-  private readonly joints: GPUBuffer;
+  private joints: GPUBuffer;
+  /** Params, points with their weights, joints named, normals: in that order. */
   private readonly buffers: readonly GPUBuffer[];
-  private readonly group: GPUBindGroup;
+  private group: GPUBindGroup;
+  /** A rewrite's vertices laid out as the buffers hold them, grown to the largest rewrite. */
+  private scratch = {
+    points: new Float32Array(0),
+    named: new Uint32Array(0),
+    normals: new Float32Array(0),
+  };
 
   constructor(device: GPUDevice, pipeline: GPUComputePipeline, mesh: GpuMesh, data: PointSkinData) {
     this.mesh = mesh;
@@ -44,15 +52,11 @@ export class GpuPointSkin {
     const count = data.weights.length / 4;
     this.count = count;
 
-    /* Each influence a vec4: its point, and its weight in w. */
-    const points = new Float32Array(count * 16);
-    for (let i = 0; i < count * 4; i++) {
-      points.set(data.points.subarray(i * 3, i * 3 + 3), i * 4);
-      points[i * 4 + 3] = data.weights[i] as number;
-    }
-    const named = Uint32Array.from(data.joints);
-    const normals = new Float32Array(count * 4);
-    for (let v = 0; v < count; v++) normals.set(data.normals.subarray(v * 3, v * 3 + 3), v * 4);
+    const { points, named, normals } = laidOut(data, count, {
+      points: new Float32Array(count * 16),
+      named: new Uint32Array(count * 4),
+      normals: new Float32Array(count * 4),
+    });
     const params = new Uint32Array([count, 0, 0, 0]);
 
     const made = (
@@ -68,22 +72,22 @@ export class GpuPointSkin {
       device.queue.writeBuffer(buffer, 0, contents);
       return buffer;
     };
-    this.joints = device.createBuffer({
-      label: 'pointSkin.joints',
-      size: Math.max(1, this.reach.joints) * 64,
-      usage: STORAGE | COPY_DST,
-    });
-    const buffers = [
+    this.joints = jointBuffer(device, this.reach.joints);
+    this.buffers = [
       made('pointSkin.params', params, UNIFORM),
       made('pointSkin.points', points, STORAGE),
       made('pointSkin.named', named, STORAGE),
       made('pointSkin.normals', normals, STORAGE),
     ];
-    this.buffers = buffers;
-    const [positionsOut, normalsOut] = mesh.vertexBuffers as [GPUBuffer, GPUBuffer];
-    this.group = device.createBindGroup({
+    this.group = this.bind(device);
+  }
+
+  private bind(device: GPUDevice): GPUBindGroup {
+    const buffers = this.buffers;
+    const [positionsOut, normalsOut] = this.mesh.vertexBuffers as [GPUBuffer, GPUBuffer];
+    return device.createBindGroup({
       label: 'pointSkin.pose',
-      layout: pipeline.getBindGroupLayout(0),
+      layout: this.pipeline.getBindGroupLayout(0),
       entries: [
         { binding: 0, resource: { buffer: buffers[0] as GPUBuffer } },
         { binding: 1, resource: { buffer: this.joints } },
@@ -94,6 +98,37 @@ export class GpuPointSkin {
         { binding: 6, resource: { buffer: normalsOut } },
       ],
     });
+  }
+
+  /**
+   * Rewrite vertices `first` onward, as many as `data` holds, in place: three queue writes at their
+   * offsets. **A queue write reaches every dispatch submitted after it**, so the renderer submits a
+   * pose already recorded before calling this, and the rewrite reaches the next pose alone, as it
+   * does on WebGL2. A joint none of the skin named before grows the joints buffer, which is made
+   * again with its bind group; the old one goes once the work already submitted is done with it.
+   */
+  rewrite(device: GPUDevice, first: number, data: PointSkinData): void {
+    const count = data.weights.length / 4;
+    const scratch = this.scratch;
+    if (scratch.named.length < count * 4) {
+      this.scratch = {
+        points: new Float32Array(count * 16),
+        named: new Uint32Array(count * 4),
+        normals: new Float32Array(count * 4),
+      };
+    }
+    const { points, named, normals } = laidOut(data, count, this.scratch);
+    const buffers = this.buffers;
+    device.queue.writeBuffer(buffers[1] as GPUBuffer, first * 64, points, 0, count * 16);
+    device.queue.writeBuffer(buffers[2] as GPUBuffer, first * 16, named, 0, count * 4);
+    device.queue.writeBuffer(buffers[3] as GPUBuffer, first * 16, normals, 0, count * 4);
+    const joints = this.reach.joints;
+    this.reach = widenReach(this.reach, data);
+    if (Math.max(1, this.reach.joints) > Math.max(1, joints)) {
+      this.joints.destroy();
+      this.joints = jointBuffer(device, this.reach.joints);
+      this.group = this.bind(device);
+    }
   }
 
   /** Write the pose's joints and record the dispatch that poses every vertex into `encoder`. */
@@ -112,4 +147,36 @@ export class GpuPointSkin {
     this.joints.destroy();
     for (const buffer of this.buffers) buffer.destroy();
   }
+}
+
+function jointBuffer(device: GPUDevice, joints: number): GPUBuffer {
+  return device.createBuffer({
+    label: 'pointSkin.joints',
+    size: Math.max(1, joints) * 64,
+    usage: STORAGE | COPY_DST,
+  });
+}
+
+/**
+ * `count` vertices of `data` as the buffers hold them, into `out`'s leading entries: each influence
+ * a vec4 of its point and its weight in w, the joints as integers, each normal a vec4.
+ */
+function laidOut(
+  data: PointSkinData,
+  count: number,
+  out: { points: Float32Array; named: Uint32Array; normals: Float32Array },
+): { points: Float32Array; named: Uint32Array; normals: Float32Array } {
+  for (let i = 0; i < count * 4; i++) {
+    out.points[i * 4] = data.points[i * 3] as number;
+    out.points[i * 4 + 1] = data.points[i * 3 + 1] as number;
+    out.points[i * 4 + 2] = data.points[i * 3 + 2] as number;
+    out.points[i * 4 + 3] = data.weights[i] as number;
+    out.named[i] = data.joints[i] as number;
+  }
+  for (let v = 0; v < count; v++) {
+    out.normals[v * 4] = data.normals[v * 3] as number;
+    out.normals[v * 4 + 1] = data.normals[v * 3 + 1] as number;
+    out.normals[v * 4 + 2] = data.normals[v * 3 + 2] as number;
+  }
+  return out;
 }

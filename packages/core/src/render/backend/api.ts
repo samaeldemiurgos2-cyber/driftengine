@@ -352,6 +352,7 @@ export type RendererApi = Omit<
   | 'disposeClothParticles'
   | 'createPointSkin'
   | 'posePointSkin'
+  | 'updatePointSkin'
   | 'disposePointSkin'
 > & {
   /**
@@ -399,6 +400,20 @@ export type RendererApi = Omit<
    * as it moves without the posed vertices ever coming back to the CPU.
    */
   posePointSkin(skin: PointSkinHandle, matrices: Float32Array): void;
+  /**
+   * Rewrite part of a skin in place: vertices `first` onward, as many as `data` holds (its four
+   * arrays a range's worth, as `createPointSkin` takes them whole), their joints, weights, points and
+   * normals. **For a skin that changes shape a few hundred vertices at a time**, a hand closing or a
+   * face's picture taken away, which was made again whole for each change: the largest part of a
+   * character's drawing on the main thread in the report that asked for this.
+   *
+   * **The pose after it reads the rewrite, and a pose before it in the frame does not**, on both
+   * backends: WebGPU submits a pose it has already recorded before it writes. The mesh's bounds take
+   * in what the rewrite reaches and never shrink, since the vertices it replaced may have been the
+   * farthest; `createPointSkin` measures a skin afresh. A range outside the mesh, arrays of
+   * different lengths and a joint past 511 are refused in words, naming the mesh's own vertices.
+   */
+  updatePointSkin(skin: PointSkinHandle, first: number, data: PointSkinData): void;
   disposePointSkin(skin: PointSkinHandle): void;
   /**
    * What the following draws lay over their surfaces beyond their materials — a rim of light, a
@@ -1020,8 +1035,10 @@ export type RendererApi = Omit<
      * depth, which is exactly right for anything that did not move and wrong in proportion to how
      * far a mover moved.
      *
-     * **Only a reconstruction reads it**, and only on WebGPU. A mover drawn twice in one frame is
-     * two objects wearing one identity: the second draw is warned about once and records no motion.
+     * **Read by a reconstruction on WebGPU, and by `temporalAa` on WebGL2**, which draws the movers
+     * again into a motion target at the end of the frame (`backend/webgl2/motionTarget.ts`). A mover
+     * drawn twice in one frame is two objects wearing one identity: the second draw is warned about
+     * once and records no motion.
      * Instanced batches and meshes rewritten with `updateMesh` need none — the batch and the mesh
      * are their own identity.
      */

@@ -27,6 +27,18 @@ import { accessorFloats } from './gltfAccessor.ts';
 import type { GltfSkin } from './gltfSkin.ts';
 import { readGltfSkins } from './gltfSkin.ts';
 import { writeInfluences } from './influences.ts';
+import type { MeshRecord } from './driftExtras.ts';
+import {
+  carriedAttributes,
+  inContract,
+  meshRecord,
+  nodeRecord,
+  restoreLight,
+  restoreMaterial,
+} from './gltfCarried.ts';
+import { restoreRecorded } from './gltfCarriedOrder.ts';
+import { readCarried } from './gltfCarriedScene.ts';
+import type { DrftCarried } from './gltfCarriedScene.ts';
 
 /* The subset of the schema this reads. Everything else is ignored or refused by name. */
 interface GltfAccessor {
@@ -52,7 +64,7 @@ interface GltfPrimitive {
   /** Morph targets: one entry per target, each naming its own delta accessors. */
   targets?: Record<string, number>[];
 }
-interface GltfPbrMetallicRoughness {
+export interface GltfPbrMetallicRoughness {
   baseColorFactor?: number[];
   metallicFactor?: number;
   roughnessFactor?: number;
@@ -94,7 +106,7 @@ interface GltfDiffuseTransmission {
 interface GltfVolume {
   attenuationColor?: number[];
 }
-interface GltfMaterial {
+export interface GltfMaterial {
   pbrMetallicRoughness?: GltfPbrMetallicRoughness;
   /**
    * The material extensions this reader knows, and everything else is ignored.
@@ -164,6 +176,8 @@ interface GltfNode {
   name?: string;
   /** Which of the document's punctual lights hangs on this node. */
   extensions?: { KHR_lights_punctual?: { light?: number } };
+  /** Read for a node a `.drft` export wrote or invented; see `driftExtras.ts`. */
+  extras?: Record<string, unknown>;
 }
 /** One `KHR_lights_punctual` light, as the extension states it. */
 interface GltfPunctualLight {
@@ -177,9 +191,10 @@ interface GltfPunctualLight {
 export interface GltfDocument {
   asset?: { version?: string; generator?: string };
   scene?: number;
-  scenes?: { nodes?: number[] }[];
+  /* `extras` on a scene, a mesh and an animation are read only where a `.drft` export left a record. */
+  scenes?: { nodes?: number[]; extras?: Record<string, unknown> }[];
   nodes?: GltfNode[];
-  meshes?: { primitives: GltfPrimitive[]; name?: string }[];
+  meshes?: { primitives: GltfPrimitive[]; name?: string; extras?: Record<string, unknown> }[];
   accessors?: GltfAccessor[];
   bufferViews?: GltfBufferView[];
   buffers?: { byteLength: number; uri?: string }[];
@@ -206,6 +221,7 @@ export interface GltfSkinDef {
 
 export interface GltfAnimationDef {
   name?: string;
+  extras?: Record<string, unknown>;
   samplers: { input: number; output: number; interpolation?: string }[];
   channels: { sampler: number; target: { node?: number; path?: string } }[];
 }
@@ -264,6 +280,11 @@ export type BufferResolver = (index: number, uri: string | undefined) => Uint8Ar
  * matrix in as well applies that placement twice and throws the rig across the scene.
  */
 const IDENTITY: readonly number[] = [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1];
+
+/** Exactly the identity, which every node a `.drft` export hangs a mesh on is until moved. */
+function isIdentity(m: readonly number[]): boolean {
+  return m.every((value, i) => value === IDENTITY[i]);
+}
 
 /* --- Node transforms, composed to world space --- */
 
@@ -803,6 +824,8 @@ export function gltfToMeshes(
   textures: AssetReference[];
   nodes: DrftNode[];
   lights: DrftLight[];
+  /** What a `.drft` export carried for the asset as a whole; absent for any other document. */
+  carried?: DrftCarried;
 } {
   const version = doc.asset?.version ?? '';
   if (!version.startsWith('2')) {
@@ -867,6 +890,15 @@ export function gltfToMeshes(
   /* The lights, placed by the same world matrix the walk computes for the geometry. */
   const lights: DrftLight[] = [];
   const punctual = doc.extensions?.KHR_lights_punctual?.lights ?? [];
+  /*
+   * What a `.drft` export recorded, beside what was read and in the same order: each mesh's ordinal,
+   * each node's position in `NODE` and the mesh it names, and each light's position in `LITE`.
+   * `restoreRecorded` acts on them.
+   */
+  const ordinals: (number | undefined)[] = [];
+  const positions: (number | undefined)[] = [];
+  const links: number[] = [];
+  const lightOrdinals: (number | undefined)[] = [];
 
   const walk = (nodeIndex: number, parent: readonly number[], parentNode: number): void => {
     if (seen.has(nodeIndex)) {
@@ -879,6 +911,13 @@ export function gltfToMeshes(
     if (node === undefined)
       throw new DrftError(`gltf: a scene names node ${nodeIndex}, which is absent`);
     const world = multiply(parent, localMatrix(node));
+    /*
+     * A node a `.drft` export made up to hang a mesh, a joint or a lamp on is no node of the asset,
+     * so it is walked for what it carries and left out of the hierarchy, its children hanging from
+     * the entry above it. Every other document has no record and walks exactly as before.
+     */
+    const record = nodeRecord(node.extras, nodeIndex);
+    const invented = record?.invented !== undefined;
     const hung = node.extensions?.KHR_lights_punctual?.light;
     if (hung !== undefined) {
       const light = punctual[hung];
@@ -888,28 +927,35 @@ export function gltfToMeshes(
         const placed = placeLight(light, world, node.name ?? light.name ?? '');
         if (placed === null)
           warnings.push(`light ${hung}: a type "${light.type}" is not a punctual light`);
-        else lights.push(placed);
+        else {
+          lights.push(restoreLight(placed, record?.light));
+          lightOrdinals.push(record?.light?.ordinal);
+        }
       }
     }
 
-    const entry = nodes.length;
-    nodes.push({
-      parent: parentNode,
-      translation: [
-        node.translation?.[0] ?? 0,
-        node.translation?.[1] ?? 0,
-        node.translation?.[2] ?? 0,
-      ],
-      rotation: [
-        node.rotation?.[0] ?? 0,
-        node.rotation?.[1] ?? 0,
-        node.rotation?.[2] ?? 0,
-        node.rotation?.[3] ?? 1,
-      ],
-      scale: [node.scale?.[0] ?? 1, node.scale?.[1] ?? 1, node.scale?.[2] ?? 1],
-      mesh: -1,
-      name: node.name ?? `node ${nodeIndex}`,
-    });
+    const entry = invented ? parentNode : nodes.length;
+    if (!invented) {
+      positions.push(record?.entry);
+      links.push(record?.mesh ?? -1);
+      nodes.push({
+        parent: parentNode,
+        translation: [
+          node.translation?.[0] ?? 0,
+          node.translation?.[1] ?? 0,
+          node.translation?.[2] ?? 0,
+        ],
+        rotation: [
+          node.rotation?.[0] ?? 0,
+          node.rotation?.[1] ?? 0,
+          node.rotation?.[2] ?? 0,
+          node.rotation?.[3] ?? 1,
+        ],
+        scale: [node.scale?.[0] ?? 1, node.scale?.[1] ?? 1, node.scale?.[2] ?? 1],
+        mesh: -1,
+        name: node.name ?? `node ${nodeIndex}`,
+      });
+    }
 
     if (node.mesh !== undefined) {
       const mesh = doc.meshes?.[node.mesh];
@@ -922,6 +968,7 @@ export function gltfToMeshes(
        */
       const skin = node.skin !== undefined ? skins[node.skin] : undefined;
       const placement = skin === undefined ? world : IDENTITY;
+      const record = meshRecord(mesh.extras, node.mesh);
       for (const primitive of mesh.primitives) {
         const built = buildPrimitive(
           doc,
@@ -932,6 +979,7 @@ export function gltfToMeshes(
           warnings,
           skin,
           options?.deriveTangents ?? true,
+          record,
         );
         if (built !== null) {
           if (built.substance !== undefined) {
@@ -940,6 +988,7 @@ export function gltfToMeshes(
           const at = meshes.length;
           meshes.push(built.mesh);
           materials.push(built.material);
+          ordinals.push(record?.ordinal);
           /*
            * Name the mesh on the graph, but **only where the geometry is actually this node's**.
            * A skinned primitive was placed at `IDENTITY` above and its vertices live in the skin's
@@ -949,10 +998,12 @@ export function gltfToMeshes(
            * become identity children: inventing a node is better than leaving a mesh that nothing
            * in the graph points at, which is a part a game cannot find by name.
            */
-          if (skin === undefined) {
+          if (skin === undefined && !invented) {
             if ((nodes[entry] as DrftNode).mesh < 0) {
               nodes[entry] = { ...(nodes[entry] as DrftNode), mesh: at };
             } else {
+              positions.push(undefined);
+              links.push(-1);
               nodes.push({
                 parent: entry,
                 translation: [0, 0, 0],
@@ -972,6 +1023,10 @@ export function gltfToMeshes(
 
   for (const root of roots) walk(root, identity(), -1);
   if (meshes.length === 0) throw new DrftError('gltf: the scene contains no triangle geometry');
+  /* What a `.drft` export recorded, put back: a document with no records is left as it was walked. */
+  const recorded = { ordinals, positions, links, lights, lightOrdinals };
+  restoreRecorded({ meshes, materials, substances, nodes, ...recorded }, warnings);
+  const carried = readCarried(doc, buffers, warnings, (index) => unplacedMesh(doc, buffers, index));
   return {
     meshes,
     warnings,
@@ -980,7 +1035,29 @@ export function gltfToMeshes(
     nodes,
     lights,
     ...(substances.length === 0 ? {} : { substances }),
+    ...(carried === undefined ? {} : { carried }),
   };
+}
+
+/**
+ * A glTF mesh no node names, read at the identity as any mesh is, or null where it is not one
+ * primitive. What a `.drft` export writes its coarse outline as; anything said reading it is about a
+ * preview and stays out of the warnings, since the scene record's digest decides whether it stands.
+ */
+function unplacedMesh(
+  doc: GltfDocument,
+  buffers: readonly Uint8Array[],
+  index: number,
+): MeshData | null {
+  const mesh = doc.meshes?.[index];
+  const primitive = mesh?.primitives[0];
+  if (mesh === undefined || primitive === undefined || mesh.primitives.length !== 1) return null;
+  const record = meshRecord(mesh.extras, index);
+  const label = mesh.name ?? `mesh ${index}`;
+  return (
+    buildPrimitive(doc, buffers, primitive, IDENTITY, label, [], undefined, false, record)?.mesh ??
+    null
+  );
 }
 
 /**
@@ -1022,6 +1099,8 @@ function buildPrimitive(
   skin?: GltfSkin,
   /** See `GltfReadOptions.deriveTangents`. A caller that welds afterwards passes false. */
   deriveTangents = true,
+  /** The record a `.drft` export left on this primitive's mesh, or undefined for any other file. */
+  carried?: MeshRecord,
 ): { mesh: MeshData; material: DrftMaterial; substance?: string } | null {
   const mode = primitive.mode ?? MODE_TRIANGLES;
   if (mode !== MODE_TRIANGLES) {
@@ -1048,9 +1127,16 @@ function buildPrimitive(
       : accessorFloats(doc, buffers, normalIndex, `${label} NORMAL`);
   if (normalIndex === undefined) warnings.push(`${label}: no NORMAL, so it will shade flat`);
 
-  /* Transform into world space, positions by the matrix and normals by its inverse transpose. */
+  /*
+   * Transform into world space, positions by the matrix and normals by its inverse transpose.
+   *
+   * **Not for a mesh this engine exported that still stands at the identity**, which is already in
+   * the asset's space: the identity moves no position, but renormalising a float32 normal moves one
+   * in its last place about as often as not, and the round trip promises the bits back.
+   */
   const nm = normalMatrix(world);
-  for (let i = 0; i < vertices; i++) {
+  const verbatim = carried !== undefined && isIdentity(world);
+  for (let i = 0; i < vertices && !verbatim; i++) {
     const x = positions[i * 3] as number;
     const y = positions[i * 3 + 1] as number;
     const z = positions[i * 3 + 2] as number;
@@ -1167,6 +1253,8 @@ function buildPrimitive(
   let tangents: Float32Array | undefined;
   if (tangentIndex !== undefined) {
     tangents = accessorFloats(doc, buffers, tangentIndex, `${label} TANGENT`);
+  }
+  if (tangents !== undefined && !verbatim) {
     /*
      * Rotated into world space by the same normal matrix the normals took, and `w` left alone:
      * it is a handedness rather than a direction, and a matrix that mirrors flips the frame
@@ -1319,6 +1407,15 @@ function buildPrimitive(
       joints = only.joints;
       weights = only.weights;
       normaliseWeights(weights, label, warnings);
+    } else if (carried !== undefined && sets.length === 2 && inContract(sets)) {
+      /* Already heaviest first and summing to one, as this engine wrote them: taken as they are,
+         since normalising again rounds a sum that was one into a different float32. */
+      [joints, weights, joints2, weights2] = [
+        (sets[0] as { joints: Float32Array }).joints,
+        (sets[0] as { weights: Float32Array }).weights,
+        (sets[1] as { joints: Float32Array }).joints,
+        (sets[1] as { weights: Float32Array }).weights,
+      ];
     } else if (sets.length > 1) {
       const vertices = (sets[0] as { joints: Float32Array }).joints.length / 4;
       const out = {
@@ -1362,15 +1459,26 @@ function buildPrimitive(
     }
   }
 
+  /*
+   * The engine's own attributes from the accessors a `.drft` export wrote them to, where it did, in
+   * place of the fills from the material above. An editor that dropped them leaves the fills, said.
+   */
+  const engine =
+    carried === undefined
+      ? null
+      : carriedAttributes(doc, buffers, primitive.attributes, carried, vertices, label);
+  if (carried !== undefined && engine === null) {
+    warnings.push(
+      `${label}: its engine attributes did not survive, so they are read from its material`,
+    );
+  }
   return {
     mesh: {
       positions,
       normals,
       colors,
-      emissive,
-      specular,
-      roughness,
-      emissiveColor,
+      ...(engine ?? { emissive, specular, roughness, emissiveColor }),
+      emissive: engine?.emissive ?? emissive,
       indices,
       ...(uvs === undefined ? {} : { uvs }),
       ...(tangents === undefined ? {} : { tangents }),
@@ -1385,7 +1493,7 @@ function buildPrimitive(
      * two textures may share one image, so following the indirection anywhere but here would
      * make the material point at whichever of them was read first.
      */
-    material: surface,
+    material: restoreMaterial(material, surface, `material "${material?.name ?? label}"`, warnings),
     /* The label an artist put on it, where they put one. A non-string is not a label. */
     ...(typeof material?.extras?.substance === 'string' && material.extras.substance.length > 0
       ? { substance: material.extras.substance }

@@ -159,6 +159,8 @@ export class TemporalPass {
     blend: number,
     periodStart: boolean,
     depthToViewZ: Float32Array,
+    /** Where the frame's movers stood last frame (`motionTarget.ts`), or null for the camera's alone. */
+    motion: WebGLTexture | null = null,
   ): WebGLTexture {
     const { gl } = this;
     this.ensureSize(width, height);
@@ -189,6 +191,12 @@ export class TemporalPass {
     gl.activeTexture(gl.TEXTURE4);
     gl.bindTexture(gl.TEXTURE_2D, this.motions[history]);
     gl.uniform1i(this.uniforms['uFlickerMotion'] ?? null, 4);
+    /* The depth stands in where no mover wrote, so the unit holds a complete texture either way;
+       the shader reads it only where `uMotionOn` is 1. */
+    gl.activeTexture(gl.TEXTURE5);
+    gl.bindTexture(gl.TEXTURE_2D, motion ?? depth);
+    gl.uniform1i(this.uniforms['uMotion'] ?? null, 5);
+    gl.uniform1f(this.uniforms['uMotionOn'] ?? null, motion === null ? 0 : 1);
     gl.uniform4fv(this.uniforms['uDepthToViewZ'] ?? null, depthToViewZ);
     gl.uniform1f(this.uniforms['uAntiFlicker'] ?? null, this.recordFloat ? 1 : 0);
 

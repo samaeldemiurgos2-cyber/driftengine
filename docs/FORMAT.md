@@ -115,6 +115,9 @@ All of this is the **baker**, which runs offline in Node. A third-party format i
 at runtime _by default_, so an experimental reader meeting a file it does not understand
 costs a failed build rather than a broken frame. See §3.3 for the deliberate exception.
 
+The arrow also runs back up, for an asset an artist will improve and drop back in: `drft export`
+writes a `.drft` as glTF that `drft bake` reads back to the same file. See §3.4.
+
 ### 3.3 Reading a source format at runtime, without baking
 
 **Built in 0.16.0.** `src/asset/readModel.ts` is one dispatcher from a file to meshes, shared by
@@ -246,6 +249,88 @@ Reading a file format is not infringement either — `.blend`'s layout is publis
 file itself, and MEL is a documented language. What would be a problem is shipping
 Autodesk's SDK or redistributing GPL code inside a permissively licensed engine, and neither path does
 either.
+
+### 3.4 `drft export` — the way back out
+
+The pipeline above runs one way, and an asset meant to be improved in a modelling tool and dropped
+back into a game needs the other. `drft export` writes a `.drft` as a glTF 2.0 binary that
+`drft bake` reads back to the same `.drft`:
+
+```
+npm run export -- model.drft -o model.glb        # --to glb is the default and the only target
+
+   .drft ──drft export──▶ .glb ──Blender, or any glTF editor──▶ .glb ──drft bake──▶ .drft
+```
+
+The work is `drftToGlb` in `@driftengine/assets`, from what `readDrft` returns to the bytes of a
+`.glb`. The way back in is the ordinary bake: `readModel` reads the `.glb`, and `bakeModel`, which
+is everything `scripts/bake.ts` does between reading a file and writing one, writes the `.drft`.
+
+**What goes where.** What glTF has a field for goes in that field, so a viewer and an editor show the
+meshes, materials, skeleton, clips, attachment points and lamps they expect. What it has no field for
+rides in records under `extras.drift`, which the reader takes back to the chunks they came from.
+
+| `.drft`                                                | In the `.glb`                                                                                                                                                                                                                                                                                                                                                                                                                                            |
+| ------------------------------------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `HEAD`                                                 | The scene's name. The name and unit scale are in the scene's record; the bounds are measured again.                                                                                                                                                                                                                                                                                                                                                      |
+| `MESH`, `MSHQ`                                         | One glTF mesh of one primitive each, in order, on a node of its own at the identity: `POSITION`, `NORMAL`, `TEXCOORD_0`, `TANGENT`, `COLOR_0` where the vertices are not the material's one colour, `JOINTS_0`/`WEIGHTS_0`, `JOINTS_1`/`WEIGHTS_1`, and the engine's own as `_EMISSIVE`, `_SPECULAR`, `_EMISSIVE_COLOR`, `_ROUGHNESS`, `_GRAIN`, `_RELIEF`, `_LAYERS` and `_CHANNEL`. The mesh's record holds its ordinal and which of those it carries. |
+| `MORP`                                                 | The primitive's morph targets, one `POSITION` accessor a target.                                                                                                                                                                                                                                                                                                                                                                                         |
+| `MATL`, `SUBS`                                         | A metallic-roughness material each, the nearest reading of the engine's fields, with the whole `MATL` entry in its record and the substance as `extras.substance`.                                                                                                                                                                                                                                                                                       |
+| `TEXS`                                                 | An image and a texture each, in order. PNG and JPEG as they are; WebP through `EXT_texture_webp`.                                                                                                                                                                                                                                                                                                                                                        |
+| `NODE`                                                 | A node per entry with its name, transform and parent. Its record holds its position in `NODE` and the mesh it names, since the mesh hangs at the identity.                                                                                                                                                                                                                                                                                               |
+| `SKIN`                                                 | A skin. Its joints are the entries of the same names where every joint has exactly one, nested as the skin nests them, so an attachment point hangs from the bone it follows; otherwise joint nodes at the bind pose the inverse binds describe.                                                                                                                                                                                                         |
+| `ANIM`                                                 | An animation per clip, a channel and a linear sampler per track, over the first skin's joints. A clip held past its last key says so in its record.                                                                                                                                                                                                                                                                                                      |
+| `LITE`                                                 | `KHR_lights_punctual`, each lamp on its entry where every lamp has one standing and pointing where it does, and on a node of its own otherwise. Its record holds its position in `LITE`, where it stands and points, a point light's cone and its range.                                                                                                                                                                                                 |
+| `ENTS`, `COLL`, `REGN`, `INST`                         | The scene's record, as JSON.                                                                                                                                                                                                                                                                                                                                                                                                                             |
+| `LODM`                                                 | A glTF mesh a level, written as any mesh is and named by no node, so a viewer does not draw the preview over the model; the scene's record names each with a digest of its geometry.                                                                                                                                                                                                                                                                     |
+| `SDFV`, `NNET`, `NGRF`, `NAVM`, `LVOL`, `DTEX`, `LODF` | Their own bytes in a buffer view, written and read back by the chunk's codec, named by the scene's record with a length and a hash.                                                                                                                                                                                                                                                                                                                      |
+
+**Exact, and measured as exact.** A file `drft bake` wrote comes back byte for byte, every chunk.
+`packages/assets/src/gltfExport.test.ts` holds a character and a level to that, quantised and not;
+and by hand, on 2026-10-18, every Blender-exported fixture under `scripts/fixtures/blend` baked,
+exported and baked back to an identical file, quantised and not. Four things make it exact: every array goes out as the float32 the file held; a mesh
+at the identity is read without being transformed, since renormalising a float32 normal moves its last
+place; influences already heaviest first are not normalised again, which moves a weight in its last
+place for about 75 vertices in 100,000; and what glTF rounds or cannot say, a lamp's direction, a clip
+held past its last key, an engine-only material field, the sign of a zero, rides in a record.
+
+**What is refused, changed or not seen.** A world built from kit pieces (`KITS`, `MSHC`) and a
+Gaussian splat capture (`SPLT`) have no glTF form here, and are refused rather than written as an
+asset that would bake back different. A `RAW` or `BC` texture has no glTF image type, so it goes out as
+PNG of its top level, which the command can encode and a caller supplies as `encodePng`; the bake
+then embeds that PNG. A chunk `readDrft` does not surface (`MSHL`) or does not understand cannot be
+exported, and the second is warned of. `HEAD`'s generator is the bake's own. A file written by hand
+rather than baked loses what any bake would remove from it: a duplicate vertex, an attribute that
+never varies.
+
+**A record is a copy, never an authority.** Each is one string of JSON under `extras.drift`, on the
+scene, a node, a mesh, a material or an animation, and each is believed only while the glTF fields
+beside it still say what the export wrote: a material's while its colour, factors, maps and modes are
+unchanged (alpha excepted where `OPAQUE` gives it no meaning), a lamp's while glTF places it within
+float32 rounding of the record, a clip's while its keys end before the recorded duration, a carried
+chunk's while its view holds the bytes its length and hash describe. An edit therefore always wins,
+and the record fills in only what nobody changed. The one exception is a lamp's range, which the
+record supplies wherever glTF states none, because an editor with no field for one cannot have meant
+to remove it.
+
+**Positions come back too.** Materials, placements, regions and entry links name a mesh by its
+ordinal, and a manifest may name an entry or a lamp by its position, so each mesh, entry and lamp
+records its own and the reader puts them back in that order whatever order an editor saved them in.
+A mesh, node or lamp added, removed or duplicated in an editor shifts what the positions after it
+name, and the reader says so rather than guessing.
+
+**Extras rather than a `DRIFT_*` extension, because of what Blender keeps.** Measured with Blender 5.2:
+its importer keeps `extras` on scenes, nodes, meshes and materials as custom properties and writes
+them back, keeps a mesh's underscore attributes, and drops every extension it does not know. Export
+from it with custom properties, punctual lights and mesh attributes included, `export_extras`,
+`export_lights` and `export_attributes` in its Python API: without punctual lights, every lamp is left
+out. On an unedited round trip through it, the names, hierarchy, skin, clips, materials, manifest,
+colliders, regions, placements and lamps come back, in their order. What does not: joint rest poses
+and node rotations come back within about 2.4e-7, and vertex colours within about 0.003, which is
+what keeping them as 8-bit sRGB would do; normals it recomputes move in their fourth decimal; an
+unnamed material comes back named `Material`; and the outline and the chunks carried in buffer views
+are lost, because Blender keeps no mesh a node does not draw and rewrites the binary, and the bake
+names each one it could not restore and builds the outline again.
 
 ---
 

@@ -9,6 +9,7 @@ import { resourceDir } from './resources.ts';
 import type { ResourceOptions } from './resources.ts';
 import { missingReferences } from './mobile/assetCheck.ts';
 import { withAndroidManifest } from './mobile/androidManifest.ts';
+import { localProperties } from './mobile/localProperties.ts';
 import { versionCodeFor } from './mobile/versionCode.ts';
 import { androidToolchain, toolchainHome } from './toolchain.ts';
 import { toolStart } from './spawnTool.ts';
@@ -116,7 +117,11 @@ export async function buildAndroid(
   }
 
   const keystore = await ensureKeystore(manifest.id, toolchain.javaHome);
-  await writeFile(join(projectRoot, 'local.properties'), `sdk.dir=${toolchain.sdkRoot}\n`, 'utf8');
+  await writeFile(
+    join(projectRoot, 'local.properties'),
+    localProperties(toolchain.sdkRoot),
+    'utf8',
+  );
 
   const version = await consumerVersion(projectDir);
   console.log(`[drift-package] android: building ${manifest.name} ${version}`);

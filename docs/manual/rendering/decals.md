@@ -67,15 +67,66 @@ ellipse, and `softness` sets how much of its radius is edge.
 It needs `screenEffects`, because it reads the frame's depth; without it, the renderer says so on the
 console and draws no marks. A frame draws at most thirty-two.
 
+## Laid into the base colour
+
+A projected mark multiplies the finished pixel, so where the surface under it glows, a lettered
+floor or a lit panel, the mark dims the glow as well. A shadow a body throws on a lit floor, a
+footprint or a stain changes what the surface is instead: it darkens the colour light falls on and
+leaves what the surface emits, its roughness and its normal as they are. `setBaseDecals` lays such
+marks, each a box like a projector's, an image read across its face, and how much of it lands:
+
+```ts sample=snippets/decals.ts#base
+/** A shadow under something standing on the floor, its box moved in place each frame. */
+const under: [number, number, number] = [0, 0.2, 0];
+const shadow: BaseDecal & { opacity: number } = {
+  center: under,
+  halfExtents: [0.3, 0.4, 0.5],
+  forward: [0, -1, 0],
+  up: [0, 0, -1],
+  image: 0,
+  opacity: 1,
+};
+const laid: BaseDecal[] = [shadow];
+
+/** Once a frame, before the draws it marks: its image redrawn, its box moved, fading with height. */
+export function layShadow(
+  renderer: RendererApi,
+  images: readonly HTMLCanvasElement[],
+  x: number,
+  z: number,
+  height: number,
+): void {
+  under[0] = x;
+  under[2] = z;
+  shadow.opacity = Math.max(0, 1 - height);
+  renderer.setBaseDecalImages(images);
+  renderer.setBaseDecals(laid);
+}
+```
+
+The base colour moves toward the image's colour by its alpha times `opacity`, before any light is
+added, and the surface is then lit and glows as it would. An image is a square of
+`BASE_DECAL_TILE` texels, 128, read as a picture: its colour is decoded from sRGB and its alpha is
+as it is. Rewriting the images once a frame is what they are for and costs an upload of the
+squares; changing how many there are costs more. The decals are held until the next call, across
+passes, so a reflection shows them too. `facingCos`, 0.2 by default, keeps a mark aimed at a floor
+off the sides of what stands on it, judged by the geometric normal so a normal map's bump does not
+cut it. A surface that stands in a decal's box and is not what it lands on, such as a body over its
+own shadow, says `receivesDecals: false` in its material.
+
+A frame lays at most eight. They take thirty-four of the lit shader's uniform vectors, so WebGL2
+refuses them, saying so once, on a part that has no room, and the GPU-driven pipeline does not draw
+them.
+
 ## Which to use
 
-|                | Baked, `projectDecal`             | Projected, `drawDecal`                         |
-| -------------- | --------------------------------- | ---------------------------------------------- |
-| Surface        | Static mesh you hold the data for | Anything drawn, including moving and deforming |
-| Cost per frame | One draw                          | One pass over the box's pixels                 |
-| Look           | Any colour, lit, can glow         | Multiplies only; an ellipse                    |
-| Needs          | The mesh data                     | `screenEffects`                                |
-| Limit          | None                              | 32 a frame                                     |
+|                | Baked, `projectDecal`             | Projected, `drawDecal`                         | Base colour, `setBaseDecals`            |
+| -------------- | --------------------------------- | ---------------------------------------------- | --------------------------------------- |
+| Surface        | Static mesh you hold the data for | Anything drawn, including moving and deforming | Anything drawn by the lit pass          |
+| Cost per frame | One draw                          | One pass over the box's pixels                 | A test per decal in every lit pixel     |
+| Look           | Any colour, lit, can glow         | Multiplies only; an ellipse                    | An image, lit, leaves the glow as it is |
+| Needs          | The mesh data                     | `screenEffects`                                | Room for 34 uniform vectors on WebGL2   |
+| Limit          | None                              | 32 a frame                                     | 8 a frame                               |
 
 For marks that must survive a replay, such as a scorch left by a weapon that a replay must reproduce,
 the writable texture overlay records every mark in the game's input log; see the Worlds section.

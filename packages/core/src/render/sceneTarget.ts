@@ -850,6 +850,8 @@ export class SceneTarget {
       readonly blend: number;
       readonly periodStart: boolean;
       readonly depthToViewZ: Float32Array;
+      /** Where the frame's movers stood last frame, or absent for the camera's motion alone. */
+      readonly motion?: WebGLTexture | null;
     },
   ): void {
     const { gl } = this;
@@ -993,6 +995,7 @@ export class SceneTarget {
         temporal.blend,
         temporal.periodStart,
         temporal.depthToViewZ,
+        temporal.motion ?? null,
       );
     }
 

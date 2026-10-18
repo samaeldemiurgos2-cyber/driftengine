@@ -2,22 +2,22 @@
 
 exports[`all sixteen fragment permutations are stable, by hash 1`] = `
 {
-  "directionalShadows": "fb1d0d23:292076",
-  "directionalShadows+environmentProbe": "cc9f2617:318087",
-  "directionalShadows+environmentProbe+nightEmissive": "9d8f9a01:320573",
-  "directionalShadows+nightEmissive": "96203937:294562",
-  "environmentProbe": "c6d9e2e5:294847",
-  "environmentProbe+nightEmissive": "2e0de825:297333",
-  "nightEmissive": "810c972f:271322",
-  "none": "4144f9dd:268836",
-  "pointShadows": "09b82dab:308273",
-  "pointShadows+directionalShadows": "80ad755d:331513",
-  "pointShadows+directionalShadows+environmentProbe": "3f4f6b61:357524",
-  "pointShadows+directionalShadows+environmentProbe+nightEmissive": "ff700b4d:360010",
-  "pointShadows+directionalShadows+nightEmissive": "9f5a146b:333999",
-  "pointShadows+environmentProbe": "06640e6b:334284",
-  "pointShadows+environmentProbe+nightEmissive": "62f697e5:336770",
-  "pointShadows+nightEmissive": "b73da497:310759",
+  "directionalShadows": "eb4ab240:298165",
+  "directionalShadows+environmentProbe": "8618f9fc:324176",
+  "directionalShadows+environmentProbe+nightEmissive": "3ec43610:326662",
+  "directionalShadows+nightEmissive": "ca1ea98e:300651",
+  "environmentProbe": "d90051e8:300936",
+  "environmentProbe+nightEmissive": "ec8b7732:303422",
+  "nightEmissive": "a100bea4:277411",
+  "none": "6219a758:274925",
+  "pointShadows": "979db25c:314362",
+  "pointShadows+directionalShadows": "16f609e8:337602",
+  "pointShadows+directionalShadows+environmentProbe": "9029a49c:363613",
+  "pointShadows+directionalShadows+environmentProbe+nightEmissive": "e912083a:366099",
+  "pointShadows+directionalShadows+nightEmissive": "b4250540:340088",
+  "pointShadows+environmentProbe": "bab368f4:340373",
+  "pointShadows+environmentProbe+nightEmissive": "30eebe18:342859",
+  "pointShadows+nightEmissive": "def3504a:316848",
 }
 `;
 
@@ -4148,12 +4148,13 @@ vec3 triplanarOrm(float layer) {
     texture(uOrmMap, vec3(p.xz, layer)).rgb * w.y + texture(uOrmMap, vec3(p.xy, layer)).rgb * w.z;
 }
 
-vec3 triplanarEmissive(float layer) {
+/* The emissive map on the three planes, each moved by the scroll: emissiveFlow.ts. */
+vec3 triplanarEmissive(float layer, vec2 shift) {
   vec3 w = triplanarWeights();
   vec3 p = vWorldPos * uWorldUv.y;
-  return texture(uEmissiveMap, vec3(p.zy, layer)).rgb * w.x +
-    texture(uEmissiveMap, vec3(p.xz, layer)).rgb * w.y +
-    texture(uEmissiveMap, vec3(p.xy, layer)).rgb * w.z;
+  return texture(uEmissiveMap, vec3(p.zy + shift, layer)).rgb * w.x +
+    texture(uEmissiveMap, vec3(p.xz + shift, layer)).rgb * w.y +
+    texture(uEmissiveMap, vec3(p.xy + shift, layer)).rgb * w.z;
 }
 
 /* A tangent-space normal off the map, its z rebuilt where a two-channel map stored none. */
@@ -4466,10 +4467,10 @@ bool layeredGlows() {
   return uLayers[1].z > -0.5;
 }
 
-/* The emissive map at its layer's place, glowing by that layer's share. */
-vec3 layeredEmissive() {
+/* The emissive map at its layer's place, moved by its scroll, glowing by that layer's share. */
+vec3 layeredEmissive(vec2 shift) {
   int glow = int(uLayers[1].z + 0.5);
-  return texture(uEmissiveMap, layerAt(glow)).rgb * layerShare(glow);
+  return texture(uEmissiveMap, layerAt(glow) + vec3(shift, 0.0)).rgb * layerShare(glow);
 }
 
 
@@ -4518,6 +4519,117 @@ void surfaceDetail(inout vec3 n, inout float occlusion, vec2 uv) {
 }
 
 
+/* Whether this program moves and masks a material's glow. Off but where one has asked. */
+const bool EMISSIVE_FLOW = true;  // wgsl:override
+/*
+ * Two vectors, as emissiveFlow.ts packs them: the scroll in repeats a second on u and v (x y) and
+ * the mask's layer of the emissive array plus one, 0 for none (z); then what takes the material's
+ * coordinates back to the mesh's own, a scale (x y) and an offset (z w).
+ */
+uniform vec4 uEmissiveFlow[2]; // wgsl:material
+
+/* The emissive map's coordinates moved by the clock, wrapped to one repeat for precision. */
+vec2 emissiveShift() {
+  return fract(uEmissiveFlow[0].xy * uSurfaceScene.x);
+}
+
+/* The mask's alpha at the mesh's own coordinates, under the branch on a bound emissive map. */
+float emissiveMask() {
+  if (uEmissiveFlow[0].z < 0.5) return 1.0;
+  vec2 own = vUv.xy * uEmissiveFlow[1].xy + uEmissiveFlow[1].zw;
+  return texture(uEmissiveMap, vec3(own, uEmissiveFlow[0].z - 1.0)).a;
+}
+
+
+/* Whether this program lays an iridescent overlay. Off but where a material has asked. */
+const bool IRIDESCENT_OVERLAY = true;  // wgsl:override
+/*
+ * Thirty-six vectors, as iridescentOverlay.ts packs them: the direction toward the sheen and the
+ * blend (0); the contrast, the tiling, the weight and 1 for on (1); the mask's array, 0 none, 1 ORM,
+ * 2 model, 3 albedo, 4 emissive, its layer and its channel (2); what takes the material's
+ * coordinates back to the mesh's own (3); then the ramp, thirty-two colours.
+ */
+uniform vec4 uIridescence[36]; // wgsl:material
+
+bool iridescent() { return uIridescence[1].w > 0.5; }
+
+/* The mask's channel at the material's coordinates; 1 where it names no array. */
+float iridescentMask(vec2 uv) {
+  float source = uIridescence[2].x;
+  if (source < 0.5) return 1.0;
+  vec3 at = vec3(uv, uIridescence[2].y);
+  vec4 texel = source < 1.5 ? texture(uOrmMap, at)
+    : source < 2.5 ? texture(uModelMap, at)
+    : source < 3.5 ? texture(uAlbedo, at)
+    : texture(uEmissiveMap, at);
+  return texel[int(uIridescence[2].z + 0.5)];
+}
+
+vec3 iridescentBase(vec3 base, vec3 n, vec2 uv) {
+  vec3 toEye = normalize(uCameraPos - vWorldPos);
+  vec3 halfway = toEye + uIridescence[0].xyz;
+  float span = length(halfway);
+  float nh = span > 0.0 ? dot(n, halfway / span) : 0.0;
+  float sheen = nh > 0.0 ? clamp(pow(nh, uIridescence[1].x), 0.0, 1.0) : 0.0;
+  float nv = dot(n, toEye);
+  vec2 own = vUv.xy * uIridescence[3].xy + uIridescence[3].zw;
+  float x = nv + own.x + uIridescence[0].w * (sheen - nv);
+  float t = clamp(fract(x * uIridescence[1].y), 0.0, 1.0);
+  float at = t * 31.0;
+  int below = min(int(floor(at)), 30);
+  vec3 o = mix(uIridescence[4 + below].rgb, uIridescence[5 + below].rgb, at - float(below));
+  vec3 blended = mix(2.0 * base * o, 1.0 - 2.0 * (1.0 - base) * (1.0 - o), step(0.5, base));
+  return base + (blended - base) * (x * iridescentMask(uv) * uIridescence[1].z);
+}
+
+
+/* Whether this program lays decals into base colours. Off but where a frame has laid one. */
+const bool BASE_DECALS = true;  // wgsl:override
+/*
+ * A header, how many decals, the atlas row their band starts at and its squares' side (0); then
+ * four vectors a decal, eight decals: the three rows taking a world point into its box, x across,
+ * y up the image, z along the projection, and its image, opacity and facing cosine.
+ */
+uniform vec4 uBaseDecals[33]; // wgsl:material
+/* x 1 where the material refuses decals, so an unwritten zero receives them. */
+uniform vec4 uDecalReceiver; // wgsl:material
+
+vec3 decalLinear(vec3 c) {
+  return mix(c / 12.92, pow((c + 0.055) / 1.055, vec3(2.4)), step(0.04045, c));
+}
+
+vec3 baseDecals(vec3 base, vec3 world, vec3 geometric) {
+  if (uDecalReceiver.x > 0.5) return base;
+  int count = int(uBaseDecals[0].x + 0.5);
+  vec2 atlas = vec2(textureSize(uFixtureAtlas, 0));
+  float span = uBaseDecals[0].z;
+  /* Half a texel of a square, so a bilinear read at its edge cannot reach the next one. */
+  float inset = 0.5 / span;
+  for (int i = 0; i < 8; i++) {
+    if (i >= count) break;
+    vec4 across = uBaseDecals[1 + i * 4];
+    vec4 up = uBaseDecals[2 + i * 4];
+    vec4 along = uBaseDecals[3 + i * 4];
+    vec4 laid = uBaseDecals[4 + i * 4];
+    vec3 local = vec3(
+      dot(across.xyz, world) + across.w,
+      dot(up.xyz, world) + up.w,
+      dot(along.xyz, world) + along.w
+    );
+    if (any(greaterThan(abs(local), vec3(1.0)))) continue;
+    if (dot(geometric, -normalize(along.xyz)) < laid.z) continue;
+    vec2 face = vec2(local.x, -local.y) * 0.5 + 0.5;
+    vec2 at = vec2(
+      (laid.x + clamp(face.x, inset, 1.0 - inset)) * span / atlas.x,
+      (uBaseDecals[0].y + clamp(face.y, inset, 1.0 - inset) * span) / atlas.y
+    );
+    vec4 texel = textureLod(uFixtureAtlas, at, 0.0);
+    base = mix(base, decalLinear(texel.rgb), clamp(texel.a * laid.y, 0.0, 1.0));
+  }
+  return base;
+}
+
+
 /* The surface's coordinates moved onto the world's horizontal plane where a material projects them,
    with the frame's coordinates and the mesh's tangents, which no longer run along them, set aside. */
 void projectSurface(inout vec3 at, inout vec2 frameAt, inout int frameTangents) {
@@ -4540,10 +4652,14 @@ vec3 ormTexel(vec3 at) {
   return texture(uOrmMap, at).rgb;
 }
 
+/* The emissive map, moved by its scroll wherever it is read: emissiveFlow.ts. Behind its switch,
+   which a WebGPU pipeline built before a material asked has off, so the mask and the scroll come
+   on together rather than the scroll a few frames ahead. */
 vec3 emissiveTexel(vec3 at) {
-  if (LAYERED && layered() && layeredGlows()) return layeredEmissive();
-  if (WORLD_UVS && triplanar()) return triplanarEmissive(at.z);
-  return texture(uEmissiveMap, at).rgb;
+  vec2 shift = EMISSIVE_FLOW ? emissiveShift() : vec2(0.0);
+  if (LAYERED && layered() && layeredGlows()) return layeredEmissive(shift);
+  if (WORLD_UVS && triplanar()) return triplanarEmissive(at.z, shift);
+  return texture(uEmissiveMap, vec3(at.xy + shift, at.z)).rgb;
 }
 
 
@@ -5110,6 +5226,8 @@ void main() {
     if (backFace) n = -n;
     /* A blending rim, on the base colour every light below reads: overlay.ts. */
     if (SURFACE_OVERLAY) albedo = overlayRimBase(albedo, surfaceAt.xy, n);
+    /* And a view-turned hue over it, before any light reads it: iridescentOverlay.ts. */
+    if (IRIDESCENT_OVERLAY && iridescent()) albedo = iridescentBase(albedo, n, surfaceAt.xy);
     /*
      * A model's surface, gathered once, on a branch on the switches alone (models.ts) — and whether
      * there is one, asked once: every site below is a branch on these two, which a pipeline with no
@@ -5118,6 +5236,13 @@ void main() {
     bool modelled = modelOn();
     bool modelledBehind = modelSeesBehind();
     if (modelled) modelSurface(n, albedo, surfaceRoughness, metal, surfaceAt);
+    /*
+     * The frame's decals laid into the colour light falls on, by the geometric normal, after the
+     * model has made its own (baseDecals.ts). The colour a glow takes where the mesh names none is
+     * kept from before them: a decal marks what the surface is lit as and leaves what it emits.
+     */
+    vec3 glowBase = albedo;
+    if (BASE_DECALS) albedo = baseDecals(albedo, vWorldPos, normalize(vNormal));
     /*
      * Skin's colour half leaves here, with the colour its spread light is multiplied by, and a whole
      * alpha a multisampled edge resolves to its coverage. A branch on the switches alone, so uniform.
@@ -6677,7 +6802,7 @@ void main() {
       lit += through * glassGlow * (thin * (1.0 - metal));
     }
     diffuseAlone = lit;
-    vec3 emissiveTint = vEmissiveColor.r < 0.0 ? albedo : vEmissiveColor;
+    vec3 emissiveTint = vEmissiveColor.r < 0.0 ? glowBase : vEmissiveColor;
     /*
      * Where the surface glows, from an image, or everywhere if it binds none.
      *
@@ -6697,6 +6822,8 @@ void main() {
     vec3 emissiveMapped = vec3(1.0);
     if (uMaterialFlags.z != 0) {
       emissiveMapped = emissiveTexel(surfaceAt) * uEmissiveScale;
+      /* Held to where the mask keeps it, at the mesh's own coordinates: emissiveFlow.ts. */
+      if (EMISSIVE_FLOW) emissiveMapped *= emissiveMask();
     }
     /* Pulse, flicker and fade from the layer's effects; exactly 1 where it names none. */
     float fxGlow = fx4.z + fx5.x + fx5.w > 0.0 ? fxEmission(surfaceAt.z) : 1.0;

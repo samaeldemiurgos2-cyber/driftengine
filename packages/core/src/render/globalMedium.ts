@@ -117,6 +117,16 @@ export interface GlobalMediumOptions {
   /** The same for the sky's fill, which lights a shadowed medium from every side. Default 1. */
   readonly skyScatter?: number;
   /**
+   * The sky's fill the medium scatters, a colour of its own in the units of
+   * `Environment.ambient`, which `skyScatter` then scales. Absent or null, the frame's ambient, as
+   * it always was. **For a scene whose surfaces are lit by more than its flat ambient**, a sky's
+   * cubemap, probes and a bake, which keeps that ambient for what falls outside them: the ambient
+   * is then the wrong colour for the sky's light in the air, and setting it to the right one would
+   * relight those surfaces too. What it gives up is the sky's direction, as the ambient does: one
+   * colour from every side.
+   */
+  readonly skyFill?: readonly [number, number, number] | null;
+  /**
    * The same for the lamps, each through its own shadow and times its own `lightMediumScatter`.
    * **Default 0**: a medium was the sun's and the sky's until there was this, and a scene that
    * never asks keeps that picture and that cost. The lamps are the lit stage's per-pixel set,
@@ -142,6 +152,8 @@ export interface ResolvedGlobalMedium {
   readonly sunScatter: number;
   readonly skyScatter: number;
   readonly lampScatter: number;
+  /** The sky's fill of the medium's own, or null for the frame's ambient: see `mediumSkyFill`. */
+  readonly skyFill: readonly [number, number, number] | null;
 }
 
 /**
@@ -192,7 +204,26 @@ export function resolveGlobalMedium(options: Partial<GlobalMediumOptions>): Reso
     sunScatter: Math.max(0, finite(options.sunScatter, 1)),
     skyScatter: Math.max(0, finite(options.skyScatter, 1)),
     lampScatter: Math.max(0, finite(options.lampScatter, 0)),
+    skyFill:
+      options.skyFill === undefined || options.skyFill === null
+        ? null
+        : [
+            Math.max(0, finite(options.skyFill[0], 0)),
+            Math.max(0, finite(options.skyFill[1], 0)),
+            Math.max(0, finite(options.skyFill[2], 0)),
+          ],
   };
+}
+
+/**
+ * The colour the medium scatters as the sky's fill: its own where it has one, else the frame's
+ * ambient. One decision both backends upload, so the two cannot disagree about which.
+ */
+export function mediumSkyFill(
+  medium: Pick<ResolvedGlobalMedium, 'skyFill'>,
+  ambient: ArrayLike<number>,
+): ArrayLike<number> {
+  return medium.skyFill ?? ambient;
 }
 
 /** `setGlobalMedium`'s object form: a density, and any of the rest. */

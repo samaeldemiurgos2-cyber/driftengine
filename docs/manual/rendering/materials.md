@@ -218,6 +218,26 @@ The rest of the fields:
   times its emissive colour, or its albedo where it has none, times the map, times the scale. A mesh
   built with no emissive stays dark whatever map it is drawn with, and `emissiveScale` with no map
   bound does nothing.
+- `emissiveScroll` moves the emissive map alone, `[u, v]` in its own repeats a second by the
+  environment's `surfaceTime`: lava drifting through cracks, a band of light running along a sign.
+  `emissiveMaskLayer` names a layer of the emissive array whose alpha keeps the glow, read at the
+  mesh's own first coordinates, before `uScale`, `uOffset`, the layers or a projection. So a glow
+  repeated eight times across a rock is held to cracks a map spanning the rock once draws, where
+  folding the mask into each vertex's emission spread it over whole faces of a coarse mesh. Alpha
+  is never decoded as sRGB, so the mask is the number written, whatever the array's colour space;
+  a layer is the array's size. Both are one switch, compiled in the first time a material asks.
+- `iridescentOverlay` lays a hue that turns with the view over the base colour, before it is lit: a
+  coat's sheen running through a spectrum as it turns. Per pixel, with `N` the mapped normal, `V`
+  toward the eye and `u` the mesh's own first coordinate, `x = N·V + u + blend (h − N·V)`, where
+  the sheen `h` is `N·H` raised to `contrast` for `H` halfway between `V` and the overlay's
+  `direction`, and 0 where `N·H` is at or below zero. The `ramp`, linear colours three floats each,
+  is read at `fract(x · tiling)`, and the base moves toward the overlay blend of itself and that
+  colour by `x · mask · weight`. Defaults: `blend` 0.6, `contrast` 1, `tiling` 2, `weight` 0.25.
+  The `mask` is a channel of a layer of the material's `orm`, `model`, `albedo` or `emissive` array,
+  read at the material's coordinates, and absent the overlay is laid everywhere. The lit stage has
+  no texture binding to spare, so the ramp is thirty-two colours of uniforms, resampled from any
+  length; that is thirty-six vectors, which WebGL2 refuses, saying so once, on a part whose lit
+  stage has no room for them.
 
 ## Drawing with a material
 

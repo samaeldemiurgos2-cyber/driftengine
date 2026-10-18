@@ -111,7 +111,7 @@ Getting what artists make into a game: importing models, the .drft container and
 - `content/importing-models.md`: **Importing models.** Reading glTF, OBJ, STL, USD, 3MF, FBX and Blender files, at build time with the baker or in a worker when a player brings a file.
 - `content/drft.md`: **The .drft container.** The engine's own file: loaded without parsing, streamed onto the screen as it arrives, and opened by every future reader.
 - `content/audio.md`: **Sound and music.** A mix of buses and snapshots, sounds by name, music whose kick drives lights, sounds placed among rooms and walls, and scripts that play it all.
-- `content/cli.md`: **Command-line tools.** The baker and its options, comparing two containers, building a distance-field font, the visual gate, the frame audit and the dev servers.
+- `content/cli.md`: **Command-line tools.** The baker and its options, exporting back to glTF, comparing two containers, a distance-field font, the visual gate, the frame audit and the dev servers.
 
 ## Interface
 

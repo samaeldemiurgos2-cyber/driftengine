@@ -689,6 +689,9 @@ export type { SurfaceProjection } from './render/surfaceProjection.ts';
 export type { SurfaceLayers } from './render/surfaceLayers.ts';
 export type { SurfaceDetail, SurfaceDetailRegion } from './render/surfaceDetail.ts';
 export { MAX_DETAIL_REGIONS } from './render/surfaceDetail.ts';
+export type { IridescentMaskMap, IridescentOverlay } from './render/iridescentOverlay.ts';
+export type { BaseDecal } from './render/baseDecals.ts';
+export { BASE_DECAL_TILE, MAX_BASE_DECALS } from './render/baseDecals.ts';
 export type { SurfaceLayerLook } from './render/surfaceLayerLooks.ts';
 /*
  * Compressed textures — BC, ETC2 and EAC, ASTC: the source `createSurfaceTexture` takes as blocks,

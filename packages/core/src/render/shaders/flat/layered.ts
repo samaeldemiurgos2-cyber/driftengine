@@ -41,7 +41,7 @@ vec3 layeredTexel() { return vec3(0.0, 0.0, 1.0); }
 bool layeredMeshNormal() { return false; }
 vec3 layeredMeshTexel() { return vec3(0.0, 0.0, 1.0); }
 bool layeredGlows() { return false; }
-vec3 layeredEmissive() { return vec3(0.0); }
+vec3 layeredEmissive(vec2 shift) { return vec3(0.0); }
 float layeredAmbient() { return 1.0; }
 float layeredSpecular(float own) { return own; }
 `;
@@ -254,10 +254,10 @@ bool layeredGlows() {
   return uLayers[1].z > -0.5;
 }
 
-/* The emissive map at its layer's place, glowing by that layer's share. */
-vec3 layeredEmissive() {
+/* The emissive map at its layer's place, moved by its scroll, glowing by that layer's share. */
+vec3 layeredEmissive(vec2 shift) {
   int glow = int(uLayers[1].z + 0.5);
-  return texture(uEmissiveMap, layerAt(glow)).rgb * layerShare(glow);
+  return texture(uEmissiveMap, layerAt(glow) + vec3(shift, 0.0)).rgb * layerShare(glow);
 }
 `;
 }

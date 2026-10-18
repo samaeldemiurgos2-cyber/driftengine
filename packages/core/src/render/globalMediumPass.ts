@@ -1,7 +1,7 @@
 import { mat4 } from 'gl-matrix';
 import type { ReadonlyMat4 } from 'gl-matrix';
 
-import { mediumTargetSize } from './globalMedium.ts';
+import { mediumSkyFill, mediumTargetSize } from './globalMedium.ts';
 import type { ResolvedGlobalMedium, ResolvedMediumLamps } from './globalMedium.ts';
 import { DEPTH_01_TO_CLIP } from './lightVolumeDraw.ts';
 import { compileProgram, uniformLocations } from './shader.ts';
@@ -236,12 +236,8 @@ export class GlobalMediumPass {
       light.sunColor[1] ?? 0,
       light.sunColor[2] ?? 0,
     );
-    gl.uniform3f(
-      u['uAmbient'] ?? null,
-      light.ambient[0] ?? 0,
-      light.ambient[1] ?? 0,
-      light.ambient[2] ?? 0,
-    );
+    const sky = mediumSkyFill(options, light.ambient);
+    gl.uniform3f(u['uAmbient'] ?? null, sky[0] ?? 0, sky[1] ?? 0, sky[2] ?? 0);
     gl.uniform1f(u['uDensity'] ?? null, options.density);
     gl.uniform2f(u['uHeight'] ?? null, options.heightFalloff, options.baseY);
     gl.uniform3f(u['uLayer2'] ?? null, options.density2, options.heightFalloff2, options.baseY2);

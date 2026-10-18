@@ -151,8 +151,14 @@ controls([
   leaves texture detail alone, and costs memory bandwidth in proportion to the samples.
 - `temporalAa` antialiases across frames: the projection moves a fraction of a pixel each frame and
   the result blends into where the last frame was. It costs one texture and one pass, against
-  multisampling's multiplied fill rate. It is exact for a still world under a moving camera; a moving
-  object under a still camera is rejected from the history, not corrected.
+  multisampling's multiplied fill rate. It is exact for a still world under a moving camera. An
+  object that moves is followed where its draws name a `Mover` (see the DriftTR chapter) or last
+  frame's model matrix, and a mesh rewritten with `updateMesh` or a point skin is followed without
+  one: on WebGL2 those are drawn again into a motion target at the end of the frame, so their pixels
+  are read from where they stood, and an object that names none is rejected from the history
+  where its colour gives it away, which leaves a faint trail where it crosses something close to
+  its own colour. Instanced batches and cloth keep the camera's motion on WebGL2, and so does a
+  multisampled frame, each said once. WebGPU follows movers through DriftTR.
 
 Both are off by default. The example's posts lean a few degrees off vertical, which is where
 missing antialiasing shows most.

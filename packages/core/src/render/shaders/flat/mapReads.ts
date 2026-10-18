@@ -30,9 +30,13 @@ vec3 ormTexel(vec3 at) {
   return texture(uOrmMap, at).rgb;
 }
 
+/* The emissive map, moved by its scroll wherever it is read: emissiveFlow.ts. Behind its switch,
+   which a WebGPU pipeline built before a material asked has off, so the mask and the scroll come
+   on together rather than the scroll a few frames ahead. */
 vec3 emissiveTexel(vec3 at) {
-  if (LAYERED && layered() && layeredGlows()) return layeredEmissive();
-  if (WORLD_UVS && triplanar()) return triplanarEmissive(at.z);
-  return texture(uEmissiveMap, at).rgb;
+  vec2 shift = EMISSIVE_FLOW ? emissiveShift() : vec2(0.0);
+  if (LAYERED && layered() && layeredGlows()) return layeredEmissive(shift);
+  if (WORLD_UVS && triplanar()) return triplanarEmissive(at.z, shift);
+  return texture(uEmissiveMap, vec3(at.xy + shift, at.z)).rgb;
 }
 `;

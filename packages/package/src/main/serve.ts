@@ -64,6 +64,12 @@ export function contentTypeFor(path: string): string {
       return 'audio/mpeg';
     case 'wav':
       return 'audio/wav';
+    /* A movie a `<video>` plays and seeks by range (`byteRange.ts`): typed as what it is rather
+       than left for the media stack to sniff out of bytes. */
+    case 'mp4':
+      return 'video/mp4';
+    case 'webm':
+      return 'video/webm';
     default:
       return 'application/octet-stream';
   }

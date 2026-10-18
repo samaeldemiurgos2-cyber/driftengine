@@ -17,6 +17,7 @@
  *     ...&layer2=0.02,0.1,0                     a second layer, density, falloff and base height
  *     ...&albedo=0.87,0.93,1                    a colour, a share a channel
  *     ...&sunscatter=5&skyscatter=0             the sun scattering five times, the sky not at all
+ *     ...&skyfill=0,0,0.4                       the sky's fill in a colour of the medium's own
  *
  * The scene: a floor, a bright far wall, a nearer wall to one side, a slab overhead that keeps the
  * sun off part of the room, and a thin dark post standing well in front of the far wall.
@@ -252,7 +253,12 @@ async function main(): Promise<void> {
   /* The object form only where one of its fields is asked for, so every older query makes the call
      it always made. */
   const layer2 = (asked.get('layer2') ?? '').split(',').map(Number);
-  if (['falloff', 'basey', 'layer2', 'sunscatter', 'skyscatter'].some((key) => asked.has(key))) {
+  const skyFill = (asked.get('skyfill') ?? '').split(',').map(Number);
+  if (
+    ['falloff', 'basey', 'layer2', 'sunscatter', 'skyscatter', 'skyfill'].some((key) =>
+      asked.has(key),
+    )
+  ) {
     renderer.setGlobalMedium({
       density,
       albedo,
@@ -271,6 +277,9 @@ async function main(): Promise<void> {
         : {}),
       sunScatter: number('sunscatter', 1),
       skyScatter: number('skyscatter', 1),
+      ...(skyFill.length === 3 && skyFill.every((v) => Number.isFinite(v))
+        ? { skyFill: [skyFill[0] as number, skyFill[1] as number, skyFill[2] as number] as const }
+        : {}),
     });
   } else {
     renderer.setGlobalMedium(density, albedo, anisotropy, maxDistance);

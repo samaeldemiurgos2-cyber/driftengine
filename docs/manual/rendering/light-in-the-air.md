@@ -168,6 +168,11 @@ more the four numbers cannot say:
   the same haze the environment draws, lit.
 - `sunScatter` and `skyScatter`, 1 by default, scale how strongly the sun and the sky's fill
   scatter, each a share of how strongly it lights a surface.
+- `skyFill` is the sky's fill as a colour of the medium's own, in the units of the environment's
+  `ambient`, which `skyScatter` then scales. Absent, the medium scatters the ambient. A scene lit
+  by a sky's cubemap, probes and a bake keeps its flat ambient for what falls outside them, so that
+  ambient is the wrong colour for the sky's light in the air, and changing it would relight those
+  surfaces too. The fill is one colour from every side, as the ambient is.
 - `lampScatter`, 0 by default, lets the lamps scatter too: the frame's per-pixel lamps, each shaped
   by its falloff and its cone and cut by its own shadow maps, so a lamp behind a post throws the
   post's shadow into the air. Each lamp's `lightMediumScatter` in the environment, 1 where absent,

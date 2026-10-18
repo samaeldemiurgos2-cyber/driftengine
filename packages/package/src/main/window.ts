@@ -1,5 +1,6 @@
 import { BrowserWindow, Menu, app, protocol, shell } from 'electron';
 import { createReadStream } from 'node:fs';
+import { stat } from 'node:fs/promises';
 import { basename, join } from 'node:path';
 import { Readable } from 'node:stream';
 
@@ -10,6 +11,7 @@ import { externalTarget } from './links.ts';
 import { appMenuTemplate } from './menu.ts';
 import { isBlockedShortcut } from './shortcuts.ts';
 import { openSteam } from '../steam/main.ts';
+import { fileAnswer } from './byteRange.ts';
 import { contentTypeFor, resolveWithinRoot } from './serve.ts';
 import { createSplash } from './splash.ts';
 import { splashDecision } from './splashTiming.ts';
@@ -98,16 +100,32 @@ export async function startApp(
    */
   const roots: Readonly<Record<string, string>> = { app: root, shell: join(__dirname, 'shell') };
 
-  protocol.handle('drift', (request) => {
+  protocol.handle('drift', async (request) => {
     const url = new URL(request.url);
     const base = roots[url.host];
     if (base === undefined) return new Response('unknown host', { status: 404 });
     const resolved = resolveWithinRoot(base, decodeURIComponent(url.pathname));
     if (resolved === null) return new Response('forbidden', { status: 403 });
+    const found = await stat(resolved).catch(() => null);
+    if (found === null || !found.isFile()) return new Response('not found', { status: 404 });
+    /* Whole or the one range asked for, with a length either way, so a `<video>` can seek: see
+       `byteRange.ts`. */
+    const answer = fileAnswer(request.headers.get('range'), found.size);
     /* Streamed rather than read whole: a `.drft` world is tens of megabytes and the loader
        consumes it progressively, which is the behaviour the streaming container exists for. */
-    return new Response(Readable.toWeb(createReadStream(resolved)) as ReadableStream, {
-      headers: { 'content-type': contentTypeFor(resolved), 'content-security-policy': CSP },
+    const body =
+      request.method === 'HEAD' || answer.end < answer.start
+        ? null
+        : (Readable.toWeb(
+            createReadStream(resolved, { start: answer.start, end: answer.end }),
+          ) as ReadableStream);
+    return new Response(body, {
+      status: answer.status,
+      headers: {
+        ...answer.headers,
+        'content-type': contentTypeFor(resolved),
+        'content-security-policy': CSP,
+      },
     });
   });
 

@@ -3,6 +3,7 @@ import { DrftError } from '@driftengine/drft';
 
 import type { GltfDocument } from './gltf.ts';
 import { accessorFloats } from './gltfAccessor.ts';
+import { restoreDuration } from './gltfCarried.ts';
 
 /**
  * Skins and animations out of a glTF document, sorted into the order a palette can be resolved in.
@@ -203,7 +204,12 @@ function readClips(
       tracks.push({ joint, path, times, values });
     }
 
-    clips.push({ name: animation.name ?? `animation ${index}`, durationSec: duration, tracks });
+    /* A clip that holds past its last key says so in a record, which only a `.drft` export writes. */
+    clips.push({
+      name: animation.name ?? `animation ${index}`,
+      durationSec: restoreDuration(animation.extras, duration, `animation ${index}`),
+      tracks,
+    });
   });
 
   return clips;

@@ -399,6 +399,8 @@ export const MAIN_GLSL = `void main() {
     if (backFace) n = -n;
     /* A blending rim, on the base colour every light below reads: overlay.ts. */
     if (SURFACE_OVERLAY) albedo = overlayRimBase(albedo, surfaceAt.xy, n);
+    /* And a view-turned hue over it, before any light reads it: iridescentOverlay.ts. */
+    if (IRIDESCENT_OVERLAY && iridescent()) albedo = iridescentBase(albedo, n, surfaceAt.xy);
     /*
      * A model's surface, gathered once, on a branch on the switches alone (models.ts) — and whether
      * there is one, asked once: every site below is a branch on these two, which a pipeline with no
@@ -407,6 +409,13 @@ export const MAIN_GLSL = `void main() {
     bool modelled = modelOn();
     bool modelledBehind = modelSeesBehind();
     if (modelled) modelSurface(n, albedo, surfaceRoughness, metal, surfaceAt);
+    /*
+     * The frame's decals laid into the colour light falls on, by the geometric normal, after the
+     * model has made its own (baseDecals.ts). The colour a glow takes where the mesh names none is
+     * kept from before them: a decal marks what the surface is lit as and leaves what it emits.
+     */
+    vec3 glowBase = albedo;
+    if (BASE_DECALS) albedo = baseDecals(albedo, vWorldPos, normalize(vNormal));
     /*
      * Skin's colour half leaves here, with the colour its spread light is multiplied by, and a whole
      * alpha a multisampled edge resolves to its coverage. A branch on the switches alone, so uniform.
@@ -1988,7 +1997,7 @@ export const MAIN_GLSL = `void main() {
       lit += through * glassGlow * (thin * (1.0 - metal));
     }
     diffuseAlone = lit;
-    vec3 emissiveTint = vEmissiveColor.r < 0.0 ? albedo : vEmissiveColor;
+    vec3 emissiveTint = vEmissiveColor.r < 0.0 ? glowBase : vEmissiveColor;
     /*
      * Where the surface glows, from an image, or everywhere if it binds none.
      *
@@ -2008,6 +2017,8 @@ export const MAIN_GLSL = `void main() {
     vec3 emissiveMapped = vec3(1.0);
     if (uMaterialFlags.z != 0) {
       emissiveMapped = emissiveTexel(surfaceAt) * uEmissiveScale;
+      /* Held to where the mask keeps it, at the mesh's own coordinates: emissiveFlow.ts. */
+      if (EMISSIVE_FLOW) emissiveMapped *= emissiveMask();
     }
     /* Pulse, flicker and fade from the layer's effects; exactly 1 where it names none. */
     float fxGlow = fx4.z + fx5.x + fx5.w > 0.0 ? fxEmission(surfaceAt.z) : 1.0;

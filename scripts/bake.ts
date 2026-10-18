@@ -15,44 +15,37 @@
  *
  * Offline, in Node. No third-party format is ever parsed at runtime, so a reader meeting
  * a file it does not understand costs a failed bake rather than a broken frame.
+ *
+ * **The bake itself is `bakeModel` in `@driftengine/assets`**: everything between reading a model and
+ * writing a container, so a test bakes the way this command does. What stays here is what needs a
+ * disk or a flag parser: choosing the file in a bundle, finding a named picture beside it, sibling
+ * levels and collision files, and the file written. A `.glb` that `drft export` wrote bakes back to
+ * the container it came from, with what glTF has no field for read from the records it left.
  */
 
 import { readFileSync, statSync, readdirSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
-import { MODEL_FORMATS, bakeSceneField, readModel, readerFor } from '@driftengine/assets';
-import type { ModelImport } from '@driftengine/assets';
+import { MODEL_FORMATS, bakeModel, readModel, readerFor } from '@driftengine/assets';
+import type { BakeModelOptions, ModelImport } from '@driftengine/assets';
 import { describeRecognised, recognise } from '@driftengine/assets';
 import { gunzipSync, inflateRawSync, inflateSync, zstdDecompressSync } from 'node:zlib';
 import { BlendNeedsBlender } from '@driftengine/assets';
 import { exportWithBlender, findBlender } from './blenderHost.ts';
 import { writeDrft } from '@driftengine/drft';
-import {
-  deriveTangentsFor,
-  dropDefaultAttributes,
-  simplifyMesh,
-  weldMesh,
-} from '@driftengine/assets';
-import { buildCoarseLevel, isOutlineWorthWriting, DEFAULT_COARSE_CELLS } from '@driftengine/assets';
-import {
-  describeUpAxis,
-  orientMeshes,
-  orientNodes,
-  orientTransforms,
-  orientLights,
-  parseUpAxis,
-} from '@driftengine/assets';
-import { componentCount, findRepeats } from '@driftengine/assets';
-import type { Repeats } from '@driftengine/assets';
-import { CODEC_RAW, DrftError, codecName } from '@driftengine/drft';
+import { dropDefaultAttributes, weldMesh } from '@driftengine/assets';
+import { withTangentsIfMapped } from '@driftengine/assets';
+import { orientMeshes, orientNodes, parseUpAxis } from '@driftengine/assets';
+import type { UpAxis } from '@driftengine/assets';
+import { DrftError, codecName } from '@driftengine/drft';
 import { MAX_COLLIDER_HULLS } from '@driftengine/drft';
 import { decomposeConvex } from '@driftengine/physics';
 import { readFile } from 'node:fs/promises';
 import type { DrftMaterial } from '@driftengine/drft';
 import type { DrftTextureSource } from '@driftengine/drft';
-import { assetCandidates } from '@driftengine/assets';
+import { assetCandidates, identifyTexture, placeholderTexture } from '@driftengine/assets';
 import type { AssetReference } from '@driftengine/assets';
-import { describeImage } from '@driftengine/assets';
 import { isDds } from '@driftengine/assets';
+import { describeDropped, reachableTextures } from '@driftengine/assets';
 /* The Node-side PNG encoder, which is why a decoded surface is not embedded uncompressed. */
 import { processTextures } from './bakeTextureCap.ts';
 import { ddsTexture } from './bakeDds.ts';
@@ -69,42 +62,6 @@ import type { MeshData } from '@driftengine/drft';
  * dispatch moved; the IO below stayed here, which is where it belongs.
  */
 const READERS = MODEL_FORMATS;
-
-/**
- * Say so when a model has ended up standing below its own origin.
- *
- * **A container's declared up axis can simply be wrong, and this tool believes it.** The car this
- * pipeline was built against declares `+y` and is a half turn about X inside that: it baked roof
- * down, and nothing in the output said anything, because a reader has no way to know. `--up -y`
- * is the fix and the whole difficulty is finding out that it is needed.
- *
- * The sign of the y range is the check that works, and it is the one recorded in the reader parity matrix
- * §2.1 as ground truth after two other heuristics gave false positives. A model that sits almost
- * entirely under y=0 has its origin on top of it, which for anything meant to stand on a floor is
- * upside down. It is a *warning* rather than a rotation, for the reason the rest of the axis
- * handling exists: every rule for measuring which way is up is wrong on something ordinary, so
- * this points at the answer and lets a person decide.
- */
-function warnIfUpsideDown(meshes: readonly MeshData[]): void {
-  let minY = Infinity;
-  let maxY = -Infinity;
-  for (const mesh of meshes) {
-    for (let at = 1; at < mesh.positions.length; at += 3) {
-      const y = mesh.positions[at] as number;
-      if (y < minY) minY = y;
-      if (y > maxY) maxY = y;
-    }
-  }
-  if (!Number.isFinite(minY) || maxY <= minY) return;
-  /* Nine tenths below the origin rather than merely more than half: a model centred on its own
-     middle is ordinary and must not warn, and one standing on y=0 is the common case. */
-  const below = -minY / (maxY - minY);
-  if (below < 0.9) return;
-  console.warn(
-    `  warning: this model spans y=${minY.toFixed(2)}..${maxY.toFixed(2)}, so it sits below its ` +
-      `origin.\n           If it looks upside down, try --up -y.`,
-  );
-}
 
 /** Every file under a directory, so a bundle's nested `gltf/` and `source/` are both seen. */
 function walk(dir: string, depth = 0): string[] {
@@ -216,25 +173,6 @@ async function loadBlend(
 }
 
 /**
- * Derive a tangent frame for a welded mesh whose material declares a normal map.
- *
- * **Deliberately here and not in the reader**, which is the correction 3.30.0 makes. A frame
- * exists to sample a normal map, and there is one place in this engine that reads one, so a
- * material with no map wants no frame — that gate has been in the reader since 3.27.0. What was
- * still wrong is the *order*: `generateTangents` accumulates per index, and a file storing one
- * vertex per triangle corner gives every corner one triangle's frame, so no two corners at a
- * point agree and `weldMesh` — which keys on the frame, since a mirrored shell differs in nothing
- * else — merges none of them.
- *
- * Measured on a rotationally unwrapped corner soup: 9,600 corners weld to 1,681 vertices with no
- * frame and to 9,482 with one derived per corner, six different frames at one point at worst.
- */
-function withTangentsIfMapped(mesh: MeshData, material: DrftMaterial | undefined): MeshData {
-  if (material === undefined || material.normalMap < 0) return mesh;
-  return deriveTangentsFor(mesh);
-}
-
-/**
  * An image, identified and wrapped for embedding: a DDS through `bakeDds.ts`, anything else by its
  * own header.
  *
@@ -252,124 +190,14 @@ function describeTexture(
   warnings: string[],
 ): DrftTextureSource {
   if (isDds(bytes)) return ddsTexture(name, bytes, decodeDds, warnings);
-  try {
-    const info = describeImage(bytes);
+  const texture = identifyTexture(name, bytes, warnings);
+  if (texture.bytes === bytes) {
     console.log(
-      `  texture ${name} — ${codecName(info.codec)} ${info.width}x${info.height}, ` +
+      `  texture ${name} — ${codecName(texture.codec)} ${texture.width}x${texture.height}, ` +
         `${(bytes.length / 1024).toFixed(0)} KB embedded`,
     );
-    return { name, codec: info.codec, width: info.width, height: info.height, bytes };
-  } catch (error) {
-    warnings.push(`texture "${name}": ${error instanceof Error ? error.message : String(error)}`);
-    return {
-      name,
-      codec: CODEC_RAW,
-      width: 1,
-      height: 1,
-      bytes: new Uint8Array([255, 255, 255, 255]),
-    };
   }
-}
-
-/**
- * Drop the images no material samples, and renumber the ones that stay.
- *
- * **A reader keeps every image the file declared, on purpose**: `gltf.ts` indexes by *texture*
- * rather than by image so a material's index means what the file said it meant, and `readModel`
- * leaves a reference that resolved to nothing in the list for the same reason. That invariant is
- * about the *read*. By the time a `.drft` is written the four ordinals in `MATL` are the only
- * things that can reach `TEXS` at all, so an entry nothing points at is bytes a browser downloads
- * and never decodes.
- *
- * It was measured at a whole model: a car written in glTF's archived specular-glossiness model
- * imported with **20 textures embedded and none of them bound**, the largest a 10 MB body map. The
- * reader now binds them, and the ones that stay unreachable — a specular-glossiness map, whose
- * channels no rearrangement fits into an ORM one — are what this drops.
- *
- * **Renumbering is the whole difficulty and the reason this is one function.** Compacting the list
- * without rewriting the ordinals repaints the model, which is exactly why both `embedTextures` and
- * `readModel` refuse to drop an entry on their own; the two halves have to happen together or
- * neither may happen.
- *
- * **What it gives up**: an image no material samples is no longer in the asset, so
- * `TextureSet.get` cannot return it and a consumer holding a name for one gets the throw that
- * lookup exists to give. That is the documented behaviour — `HANDBOOK` §3 had promised *only
- * images a material actually reaches are embedded* for longer than it had been true — and the
- * alternative is every asset carrying its source's whole texture folder. **What would make it wrong**: a
- * consumer that wants an unsampled image out of the container for its own use, which would need a
- * way to say so rather than the accident of it having been left in.
- *
- * An ordinal already past the end of the list is left exactly where it is. It is a broken import
- * either way and `readDrft` refuses it by name; renumbering it would turn that refusal into a
- * silently wrong texture.
- */
-function reachableTextures(
-  refs: readonly AssetReference[],
-  materials: readonly DrftMaterial[] | undefined,
-): {
-  refs: readonly AssetReference[];
-  materials: readonly DrftMaterial[] | undefined;
-  dropped: readonly AssetReference[];
-} {
-  const reached = new Set<number>();
-  for (const material of materials ?? []) {
-    for (const index of [
-      material.albedo,
-      material.normalMap,
-      material.ormMap,
-      material.emissiveMap,
-    ]) {
-      if (index >= 0 && index < refs.length) reached.add(index);
-    }
-  }
-  if (reached.size === refs.length) return { refs, materials, dropped: [] };
-
-  const at = new Int32Array(refs.length).fill(-1);
-  const kept: AssetReference[] = [];
-  const dropped: AssetReference[] = [];
-  for (let i = 0; i < refs.length; i++) {
-    const reference = refs[i] as AssetReference;
-    if (reached.has(i)) {
-      at[i] = kept.length;
-      kept.push(reference);
-    } else {
-      dropped.push(reference);
-    }
-  }
-  const through = (index: number): number =>
-    index >= 0 && index < refs.length ? (at[index] as number) : index;
-
-  return {
-    refs: kept,
-    materials: materials?.map((material) => ({
-      ...material,
-      albedo: through(material.albedo),
-      normalMap: through(material.normalMap),
-      ormMap: through(material.ormMap),
-      emissiveMap: through(material.emissiveMap),
-    })),
-    dropped,
-  };
-}
-
-/** One line naming what was left out, because an image silently missing from a bake is not a saving. */
-function reportDropped(dropped: readonly AssetReference[]): void {
-  if (dropped.length === 0) return;
-  const carried = dropped.reduce((sum, reference) => sum + (reference.bytes?.length ?? 0), 0);
-  const names = dropped.map((reference) => reference.name);
-  const listed =
-    names.length > 6
-      ? `${names.slice(0, 6).join(', ')} and ${names.length - 6} more`
-      : names.join(', ');
-  /* KB under a megabyte: this line exists to show what was saved, and `0.0 MB` shows nothing. */
-  const size =
-    carried >= 1024 * 1024
-      ? `${(carried / 1024 / 1024).toFixed(1)} MB`
-      : `${(carried / 1024).toFixed(0)} KB`;
-  console.log(
-    `  ${dropped.length} image${dropped.length === 1 ? '' : 's'} no material samples, not embedded: ${listed}` +
-      (carried === 0 ? '' : ` (${size} the model carried)`),
-  );
+  return texture;
 }
 
 /**
@@ -420,15 +248,8 @@ function embedTextures(
       warnings.push(
         `texture "${declared}" was not found beside the model; it will draw untextured`,
       );
-      /* A placeholder keeps every material's index meaning what it meant. Dropping the
-         entry instead would renumber every texture after it and repaint the model. */
-      out.push({
-        name: declared,
-        codec: CODEC_RAW,
-        width: 1,
-        height: 1,
-        bytes: new Uint8Array([255, 255, 255, 255]),
-      });
+      /* A placeholder keeps every material's index meaning what it meant. */
+      out.push(placeholderTexture(declared));
       continue;
     }
 
@@ -522,6 +343,139 @@ function boundsHull(positions: Float32Array): Float32Array {
   return out;
 }
 
+/** What `textured` in `main` does: the flags' processing over embedded pictures. */
+type Textured = (
+  textures: DrftTextureSource[],
+  materials: readonly DrftMaterial[] | undefined,
+  warnings: string[],
+) => Promise<DrftTextureSource[]>;
+
+/**
+ * Discrete levels of detail, where a bundle ships them as sibling files.
+ *
+ * **Each is baked whole and nested, not merged into `LODM`.** A hand-authored level is a complete
+ * model with its own materials and hierarchy; `LODM` holds one merged, material-less outline for a
+ * progressive load. Folding one into the other would discard every material the level carries,
+ * which is the opposite of why a source ships four of them.
+ */
+async function bakeLevels(
+  chosen: string,
+  siblings: readonly string[],
+  args: readonly string[],
+  up: UpAxis | null,
+  quantise: boolean,
+  decodeDds: boolean,
+  textured: Textured,
+): Promise<Uint8Array[]> {
+  const levelFiles = args.includes('--no-levels')
+    ? []
+    : levelsBeside(path.basename(chosen), siblings);
+  const levels: Uint8Array[] = [];
+  /* Collected and not printed, as they always were: a level's missing picture is the model's. */
+  const warnings: string[] = [];
+  for (const name of levelFiles) {
+    const full = path.join(path.dirname(chosen), name);
+    const level = await loadModel(full);
+    /* The same order as level 0: weld, then derive for the materials that sample one. */
+    const levelMeshes = level.meshes.map((mesh, at) =>
+      dropDefaultAttributes(withTangentsIfMapped(weldMesh(mesh), level.materials?.[at])),
+    );
+    const oriented = up === null || up === '+y' ? levelMeshes : orientMeshes(levelMeshes, up);
+    /*
+     * A level carries its own textures, and it has to: `DrftMaterial.albedo` is an ordinal into
+     * the asset's own texture list, so a nested file whose materials point at level 0's images is
+     * not a valid asset and `readDrft` refuses it — correctly. That is what makes a level
+     * independently openable, and it is the cost `--no-levels` exists to decline.
+     */
+    const levelReached = reachableTextures(level.textures ?? [], level.materials);
+    const dropped = describeDropped(levelReached.dropped);
+    if (dropped !== null) console.log(dropped);
+    const levelTextures = await textured(
+      levelReached.refs.length === 0
+        ? []
+        : embedTextures(levelReached.refs, full, path.dirname(full), decodeDds, warnings),
+      levelReached.materials,
+      warnings,
+    );
+    levels.push(
+      new Uint8Array(
+        writeDrft({
+          meshes: oriented,
+          quantise,
+          head: { name: path.basename(name, path.extname(name)), generator: 'drft bake' },
+          ...(levelTextures.length === 0 ? {} : { textures: levelTextures }),
+          ...(levelReached.materials === undefined
+            ? {}
+            : { materials: [...levelReached.materials] }),
+          ...(level.nodes === undefined || level.nodes.length === 0
+            ? {}
+            : { nodes: up === null ? level.nodes : orientNodes(level.nodes, up) }),
+        }),
+      ),
+    );
+    console.log(
+      `  level ${levels.length}: ${name}, ${oriented.length} meshes, ` +
+        `${level.materials?.length ?? 0} materials, ${((levels[levels.length - 1]?.length ?? 0) / 1024 / 1024).toFixed(1)} MB`,
+    );
+  }
+  return levels;
+}
+
+/**
+ * **`--collider` decides what the file collides as, and `none` is the default**, which leaves any
+ * colliders a `.drft` export carried to stand.
+ *
+ * `box` is the asset's own bounds as one hull, which costs nothing and is what a great many props
+ * actually want. `hull[:N]` decomposes the geometry with `decomposeConvex`, at most N parts.
+ *
+ * **A vehicle folder's `collider.kn5` is preferred over the model's own geometry**, and that is
+ * the whole point of finding it: an artist who shipped a collision mesh meant that mesh to be the
+ * collision, and it is a fraction of the triangles.
+ */
+async function bakeColliders(
+  mode: ColliderMode,
+  chosen: string,
+  siblings: readonly string[],
+  meshes: readonly MeshData[],
+  up: UpAxis | null,
+): Promise<Float32Array[] | undefined> {
+  if (mode.kind === 'none') {
+    const beside = colliderBeside(siblings);
+    if (beside !== null) {
+      console.log(`  collider: ${beside} found and not baked — pass --collider hull to carry it`);
+    }
+    return undefined;
+  }
+  const hull = colliderBeside(siblings);
+  let source = { positions: collisionPositions(meshes), indices: collisionIndices(meshes) };
+  if (hull !== null) {
+    const beside = await readModel({
+      name: hull,
+      bytes: new Uint8Array(await readFile(path.join(path.dirname(chosen), hull))),
+    });
+    const besideMeshes = up === null ? beside.meshes : orientMeshes(beside.meshes, up);
+    source = {
+      positions: collisionPositions(besideMeshes),
+      indices: collisionIndices(besideMeshes),
+    };
+    console.log(`  collider: ${hull}, ${besideMeshes.length} meshes — baked into this file`);
+  }
+  if (mode.kind === 'box') {
+    console.log('  collider: the asset bounds, as one hull');
+    return [boundsHull(source.positions)];
+  }
+  const decomposed = decomposeConvex(source.positions, source.indices, {
+    maxHulls: mode.maxHulls,
+  });
+  const colliders = decomposed.parts.map((part) => part.points);
+  console.log(
+    `  collider: ${colliders.length} hulls, ` +
+      `${(decomposed.bloat * 100).toFixed(1)}% over the source by volume, ` +
+      `${(decomposed.coverage * 100).toFixed(1)}% of it covered`,
+  );
+  return colliders;
+}
+
 async function main(): Promise<void> {
   const args = process.argv.slice(2);
   const input = args[0];
@@ -556,7 +510,7 @@ async function main(): Promise<void> {
    * It was off unless asked for, on the argument that whether a coarse level of *this* asset is
    * worth looking at cannot be measured here: detail living well below the grid decimated into
    * lumps and ridges, and a viewer waiting for a car saw white cliffs, which is worse than an
-   * empty stage because an empty stage reads as a load and a bad preview reads as a broken
+   * empty scene because an empty scene reads as a load and a bad preview reads as a broken
    * import. That argument was about the clustering hull. The occupancy hull emits the boundary
    * of a solid, so the worst case is a coarse version of the shape rather than a shape that was
    * never there, and the cost is 150 KB of a 76 MB car and about 640 ms of a bake.
@@ -574,12 +528,14 @@ async function main(): Promise<void> {
    */
   const lodArg = args[lodIndex + 1];
   const lodNamed = lodArg !== undefined && !lodArg.startsWith('-');
+  /* `null` refuses, a number asks, and absent leaves it to `bakeModel`: a carried outline, or the
+     default resolution. */
   const lodCells = args.includes('--no-lod')
-    ? undefined
+    ? null
     : lodIndex === -1 || !lodNamed
-      ? DEFAULT_COARSE_CELLS
+      ? undefined
       : Number(lodArg);
-  if (lodCells !== undefined && !Number.isFinite(lodCells)) {
+  if (typeof lodCells === 'number' && !Number.isFinite(lodCells)) {
     console.error(`--lod wants a number of cells, got "${lodArg ?? ''}"`);
     process.exit(1);
   }
@@ -658,44 +614,16 @@ async function main(): Promise<void> {
     chosen = input;
   }
 
-  const {
-    meshes: raw,
-    warnings,
-    notes,
-    declaredUp,
-    materials: readMaterials,
-    substances,
-    textures: textureRefs,
-    unitScale,
-    skins,
-    clips,
-    nodes,
-    lights,
-  } = path.extname(chosen).toLowerCase() === '.blend'
-    ? await loadBlend(
-        chosen,
-        args,
-        outIndex === -1 ? process.cwd() : path.dirname(path.resolve(args[outIndex + 1] as string)),
-      )
-    : await loadModel(chosen);
-  /*
-   * `--blend-as-cutout`: every blended material becomes a cutout at glTF's own default of 0.5.
-   * Foliage is authored `BLEND` as often as `MASK`, and a leaf drawn blended is sorted, soft-edged
-   * and writes no depth; nothing in the file says which the author meant, so the bake is told. Each
-   * one converted is printed, so a pane of glass converted by mistake is seen.
-   */
-  const materials = args.includes('--blend-as-cutout')
-    ? readMaterials?.map((material) => {
-        if (material.blend !== true) return material;
-        console.log(
-          `  material "${material.name}": blended, baked as a cutout at 0.5 (--blend-as-cutout)`,
-        );
-        return { ...material, blend: false, cutout: 0.5 };
-      })
-    : readMaterials;
-  for (const note of notes) console.log(`  ${note}`);
-  for (const warning of warnings) console.warn(`  warning: ${warning}`);
-  const warned = warnings.length;
+  const imported =
+    path.extname(chosen).toLowerCase() === '.blend'
+      ? await loadBlend(
+          chosen,
+          args,
+          outIndex === -1
+            ? process.cwd()
+            : path.dirname(path.resolve(args[outIndex + 1] as string)),
+        )
+      : await loadModel(chosen);
   /*
    * `--texture-codec jpeg`: opaque PNGs become JPEG, normal maps excepted; `jpeg-all` takes the normal
    * maps too. See `bakeTextureCap.ts` for what each gives up.
@@ -722,6 +650,7 @@ async function main(): Promise<void> {
   const textured = (
     textures: DrftTextureSource[],
     materialList: readonly DrftMaterial[] | undefined,
+    warnings: string[],
   ): Promise<DrftTextureSource[]> => {
     if (maxTexture === undefined && jpeg === undefined && !directxNormals) {
       return Promise.resolve(textures);
@@ -742,266 +671,14 @@ async function main(): Promise<void> {
   };
   /* `MSHQ` rather than `MESH` unless declined: about a third of the geometry, within stated bounds. */
   const quantise = !args.includes('--no-quantise');
-
-  /*
-   * Weld, then drop what never varies. Importers emit one vertex per triangle corner
-   * because the source formats index attributes separately, so a real model arrives
-   * several times larger than it is — and an attribute holding one repeated number costs
-   * four bytes a vertex to say nothing.
-   */
-  const before = raw.reduce((sum, mesh) => sum + mesh.positions.length / 3, 0);
-  const welded = raw.map((mesh, at) =>
-    dropDefaultAttributes(withTangentsIfMapped(weldMesh(mesh), materials?.[at])),
-  );
-  /*
-   * **Copies an export merged into one mesh, found again.** A scene that shipped ten thousand
-   * candles as one mesh of nineteen million triangles is one candle and ten thousand matrices, and
-   * `findRepeats` says so only when every copy is a rigid move of the first, attribute for
-   * attribute. The candidate counts are the meshes' own connected pieces. Found here, on the welded
-   * meshes, and written at the end: the outline, the colliders and the hierarchy below are all
-   * measured from every copy, and only what is written is the prototype.
-   */
-  const repeats: (Repeats | null)[] = args.includes('--no-instances')
-    ? []
-    : (() => {
-        const counts = welded.map((mesh) => componentCount(mesh));
-        return welded.map((mesh, at) => {
-          const found = findRepeats(mesh, counts);
-          if (found !== null) {
-            const saved = mesh.positions.length / 3 - found.prototype.positions.length / 3;
-            console.log(
-              `  mesh ${at}: ${found.count} copies of one ${found.prototype.indices.length / 3}-triangle ` +
-                `shape, written once with ${found.count} placements (${saved} vertices fewer)`,
-            );
-          }
-          return found;
-        });
-      })();
-  const after = welded.reduce((sum, mesh) => sum + mesh.positions.length / 3, 0);
-  if (after < before) {
-    console.log(
-      `  welded ${before} corners to ${after} vertices (${(100 - (after / before) * 100).toFixed(0)}% fewer)`,
-    );
-  }
-
-  /*
-   * Stand it up. `--up` wins over what the file declared, because the reason to type it is
-   * having looked at a model whose file was wrong — and when the two disagree, both are
-   * printed, so an override is never mistaken for what the file said.
-   *
-   * After welding rather than before: the turn is rigid, so it cannot change which vertices
-   * merge, and doing it here touches the deduplicated set rather than every corner.
-   */
-  const up = assetUp ?? declaredUp ?? null;
-  const meshes = up === null || up === '+y' ? welded : orientMeshes(welded, up);
-  if (assetUp !== null && declaredUp !== undefined && declaredUp !== assetUp) {
-    console.log(`  the file declares up is ${declaredUp}; --up ${assetUp} overrides it`);
-  }
-  if (up !== null && up !== '+y') {
-    const source = assetUp === null ? 'the file declares' : '--up';
-    console.log(`  ${source} ${up}: ${describeUpAxis(up)}, into the engine's Y-up frame`);
-  }
-  /*
-   * The hierarchy turns with the geometry. `orientMeshes` above rotates the meshes, and a graph
-   * left unturned would claim every part is somewhere it no longer is — with both halves
-   * individually well formed, so nothing downstream could detect the disagreement.
-   */
-  const turnedNodes = nodes === undefined || up === null ? nodes : orientNodes(nodes, up);
-  if (turnedNodes !== undefined && turnedNodes.length > 0) {
-    const transforms = turnedNodes.filter((node) => node.mesh < 0).length;
-    console.log(
-      `  hierarchy: ${turnedNodes.length} nodes, ${transforms} of them transforms only, ` +
-        'written as NODE beside world-space meshes',
-    );
-  }
-  warnIfUpsideDown(meshes);
-
-  /* Textures last, because a reference is only worth resolving once the meshes that name
-     it have survived the read. */
-  const reached = reachableTextures(textureRefs ?? [], materials);
-  reportDropped(reached.dropped);
-  const embedded = await textured(
-    reached.refs.length === 0
-      ? []
-      : embedTextures(
-          reached.refs,
-          chosen,
-          stat.isDirectory() ? input : path.dirname(chosen),
-          decodeDds,
-          warnings,
-        ),
-    reached.materials,
-  );
-  for (const warning of warnings.slice(warned)) console.warn(`  warning: ${warning}`);
-
-  /*
-   * The outline, built from the meshes as they will be written rather than as they were read:
-   * welded and stood the right way up, so it lands in the same frame as the model it stands for.
-   *
-   * A model whose geometry all collapses into one cell has no outline worth a chunk, and that is
-   * a `null` rather than an empty mesh — see `buildCoarseLevel`. It is said out loud either way,
-   * because a stage of the reveal silently not being in a file is exactly the kind of absence
-   * nobody notices until they are watching a load and wondering why it starts on nothing.
-   */
-  const built = lodCells === undefined ? null : buildCoarseLevel(meshes, { cells: lodCells });
-  /* An outline bigger than the model it stands for is not one: see `isOutlineWorthWriting`. */
-  const lod = built !== null && isOutlineWorthWriting(built, meshes) ? built : null;
-  if (lod !== null) {
-    const lodTriangles = lod.indices.length / 3;
-    const lodBytes =
-      lod.positions.length * 4 * 3 + lod.emissive.length * 4 + lod.indices.length * 4;
-    console.log(
-      `  outline at ${lodCells ?? DEFAULT_COARSE_CELLS} cells: ${lod.positions.length / 3} vertices, ` +
-        `${lodTriangles} triangles (${(lodBytes / 1024).toFixed(0)} KB), which is what arrives first. ` +
-        `Look at it before shipping it.`,
-    );
-  } else if (built !== null) {
-    console.log(
-      `  no outline: the grid gives ${built.indices.length / 3} triangles for a model of ` +
-        `${meshes.reduce((sum, mesh) => sum + mesh.indices.length / 3, 0)}, so it would cost more than it saves`,
-    );
-  } else if (lodCells !== undefined) {
-    console.log(
-      '  no outline: this asset has no extent to lay a grid over, so the parts arrive first',
-    );
-  } else {
-    console.log('  no outline: --no-lod, so a load of this file opens on an empty stage');
-  }
-
-  /*
-   * Discrete levels of detail, where a bundle ships them as sibling files.
-   *
-   * **Each is baked whole and nested, not merged into `LODM`.** A hand-authored level is a
-   * complete model with its own materials and hierarchy; `LODM` holds one merged, material-less
-   * outline for a progressive load. Folding one into the other would discard every material the
-   * level carries, which is the opposite of why a source ships four of them.
-   */
+  const up = assetUp ?? imported.declaredUp ?? null;
   const siblings = readdirSync(path.dirname(chosen));
-  const levelFiles = args.includes('--no-levels')
-    ? []
-    : levelsBeside(path.basename(chosen), siblings);
-  const levels: Uint8Array[] = [];
-  for (const name of levelFiles) {
-    const full = path.join(path.dirname(chosen), name);
-    const level = await loadModel(full);
-    /* The same order as level 0 above: weld, then derive for the materials that sample one. */
-    const levelMeshes = level.meshes.map((mesh, at) =>
-      dropDefaultAttributes(withTangentsIfMapped(weldMesh(mesh), level.materials?.[at])),
-    );
-    const oriented = up === null || up === '+y' ? levelMeshes : orientMeshes(levelMeshes, up);
-    /*
-     * A level carries its own textures, and it has to: `DrftMaterial.albedo` is an ordinal into
-     * the asset's own texture list, so a nested file whose materials point at level 0's images is
-     * not a valid asset and `readDrft` refuses it — correctly. That is what makes a level
-     * independently openable, and it is the cost `--no-levels` exists to decline.
-     */
-    const levelReached = reachableTextures(level.textures ?? [], level.materials);
-    reportDropped(levelReached.dropped);
-    const levelTextures = await textured(
-      levelReached.refs.length === 0
-        ? []
-        : embedTextures(levelReached.refs, full, path.dirname(full), decodeDds, warnings),
-      levelReached.materials,
-    );
-    levels.push(
-      new Uint8Array(
-        writeDrft({
-          meshes: oriented,
-          quantise,
-          head: { name: path.basename(name, path.extname(name)), generator: 'drft bake' },
-          ...(levelTextures.length === 0 ? {} : { textures: levelTextures }),
-          ...(levelReached.materials === undefined
-            ? {}
-            : { materials: [...levelReached.materials] }),
-          ...(level.nodes === undefined || level.nodes.length === 0
-            ? {}
-            : { nodes: up === null ? level.nodes : orientNodes(level.nodes, up) }),
-        }),
-      ),
-    );
-    console.log(
-      `  level ${levels.length}: ${name}, ${oriented.length} meshes, ` +
-        `${level.materials?.length ?? 0} materials, ${(levels[levels.length - 1]!.length / 1024 / 1024).toFixed(1)} MB`,
-    );
-  }
-  /*
-   * **`--collider` decides what the file collides as, and `none` is the default.**
-   *
-   * `box` is the asset's own bounds as one hull, which costs nothing and is what a great many props
-   * actually want. `hull[:N]` decomposes the geometry with `decomposeConvex`, at most N parts.
-   *
-   * **A vehicle folder's `collider.kn5` is preferred over the model's own geometry**, and that is
-   * the whole point of finding it: an artist who shipped a collision mesh meant that mesh to be the
-   * collision, and it is a fraction of the triangles. This printed a line telling the operator to
-   * bake it separately for as long as `COLL` had no payload to put it in; it has one at 1.12.
-   */
-  const colliderMode = colliderFlag(args);
-  let colliders: Float32Array[] | undefined;
-  if (colliderMode.kind !== 'none') {
-    const hull = colliderBeside(siblings);
-    let source = { positions: collisionPositions(meshes), indices: collisionIndices(meshes) };
-    if (hull !== null) {
-      const beside = await readModel({
-        name: hull,
-        bytes: new Uint8Array(await readFile(path.join(path.dirname(chosen), hull))),
-      });
-      const besideMeshes = up === null ? beside.meshes : orientMeshes(beside.meshes, up);
-      source = {
-        positions: collisionPositions(besideMeshes),
-        indices: collisionIndices(besideMeshes),
-      };
-      console.log(`  collider: ${hull}, ${besideMeshes.length} meshes — baked into this file`);
-    }
-    if (colliderMode.kind === 'box') {
-      colliders = [boundsHull(source.positions)];
-      console.log('  collider: the asset bounds, as one hull');
-    } else {
-      const decomposed = decomposeConvex(source.positions, source.indices, {
-        maxHulls: colliderMode.maxHulls,
-      });
-      colliders = decomposed.parts.map((part) => part.points);
-      console.log(
-        `  collider: ${colliders.length} hulls, ` +
-          `${(decomposed.bloat * 100).toFixed(1)}% over the source by volume, ` +
-          `${(decomposed.coverage * 100).toFixed(1)}% of it covered`,
-      );
-    }
-  } else if (colliderBeside(siblings) !== null) {
-    console.log(
-      `  collider: ${colliderBeside(siblings)} found and not baked — pass --collider hull to carry it`,
-    );
-  }
 
-  const output =
-    outIndex === -1
-      ? `${path.basename(chosen, path.extname(chosen))}.drft`
-      : (args[outIndex + 1] as string);
-  /*
-   * What is written: the prototype in place of each mesh found to be copies, welded again (a
-   * prototype found through its triangles is one vertex a corner) and stood up like the rest, and
-   * its placements turned into the same frame.
-   */
-  const instances: { mesh: number; transforms: Float32Array }[] = [];
-  const placed = meshes.map((mesh, at) => {
-    const found = repeats[at];
-    if (found === undefined || found === null) return mesh;
-    const prototype = dropDefaultAttributes(weldMesh(found.prototype));
-    const turned =
-      up === null || up === '+y' ? prototype : (orientMeshes([prototype], up)[0] as MeshData);
-    instances.push({
-      mesh: at,
-      transforms:
-        up === null || up === '+y' ? found.transforms : orientTransforms(found.transforms, up),
-    });
-    return turned;
-  });
   /*
    * `--simplify m`: every mesh written brought down to the triangles its shape needs, the surface
    * moving no further than `m` and its textures no further than a texel of a 1,024 map. A bought
-   * scene modelled for an offline renderer is mostly triangles smaller than a pixel. After the
-   * copies are found, so a prototype is simplified once for all its placements, and after the
-   * outline, the colliders and the field above, which are measured from what the author made.
-   * Absent writes the bytes it always did.
+   * scene modelled for an offline renderer is mostly triangles smaller than a pixel. Absent writes
+   * the bytes it always did.
    */
   const simplifyIndex = args.indexOf('--simplify');
   const simplifyError = simplifyIndex === -1 ? undefined : Number(args[simplifyIndex + 1]);
@@ -1009,25 +686,9 @@ async function main(): Promise<void> {
     console.error(`--simplify wants a distance in metres, got "${args[simplifyIndex + 1] ?? ''}"`);
     process.exit(1);
   }
-  const written =
-    simplifyError === undefined
-      ? placed
-      : placed.map((mesh, at) => {
-          const simpler = simplifyMesh(mesh, { maxError: simplifyError });
-          const from = mesh.indices.length / 3;
-          const to = simpler.indices.length / 3;
-          if (to < from) {
-            const name = materials?.[at]?.name ?? `mesh ${at}`;
-            console.log(
-              `  simplified ${name}: ${from} triangles to ${to} (${Math.round((100 * to) / from)}%)`,
-            );
-          }
-          return simpler;
-        });
   /*
    * `--sdf m`: one distance field over the static geometry at `m` metres a voxel, for tracing
-   * indirect light. Static means drawn once and neither blended nor cut out: walls and floors, not
-   * foliage, cloth or the copies of a candle. Absent writes the bytes it always did.
+   * indirect light. Absent writes the bytes it always did.
    */
   const sdfIndex = args.indexOf('--sdf');
   const sdfVoxel = sdfIndex === -1 ? undefined : Number(args[sdfIndex + 1]);
@@ -1035,73 +696,50 @@ async function main(): Promise<void> {
     console.error(`--sdf wants a voxel size in metres, got "${args[sdfIndex + 1] ?? ''}"`);
     process.exit(1);
   }
-  const copied = new Set(instances.map((group) => group.mesh));
-  const sceneField =
-    sdfVoxel === undefined
-      ? null
-      : bakeSceneField(placed, sdfVoxel, (at) => {
-          if (copied.has(at)) return false;
-          const material = reached.materials?.[at];
-          return material === undefined || (material.cutout <= 0 && material.blend !== true);
-        });
-  if (sceneField !== null) {
-    const [nx, ny, nz] = sceneField.dims;
-    console.log(
-      `  field: ${nx}x${ny}x${nz} at ${String(sdfVoxel)} m, ${((nx * ny * nz * 4) / 1e6).toFixed(1)} MB`,
-    );
-  }
-  const buffer = writeDrft({
-    meshes: written,
+  const colliderMode = colliderFlag(args);
+
+  const options: BakeModelOptions = {
+    name: path.basename(chosen, path.extname(chosen)),
+    up: assetUp,
+    ...(lodCells === undefined ? {} : { lodCells }),
+    findInstances: !args.includes('--no-instances'),
     quantise,
-    ...(sceneField === null ? {} : { fields: [sceneField] }),
-    ...(instances.length === 0 ? {} : { instances }),
-    ...(lod === null ? {} : { lods: [lod] }),
-    head: {
-      name: path.basename(chosen, path.extname(chosen)),
-      generator: 'drft bake',
-      ...(unitScale === undefined ? {} : { unitScale }),
-    },
-    ...(reached.materials === undefined ? {} : { materials: [...reached.materials] }),
-    /*
-     * The substance labels an artist put on their glTF materials, as `SUBS` at 1.8.
-     *
-     * Spread conditionally like every optional field beside it, so a model with no labels writes
-     * exactly the bytes it always did — which is what keeps `bake:check` meaningful and what makes
-     * 1.8 additive in practice rather than only on paper.
-     */
-    ...(substances === undefined || substances.length === 0 ? {} : { substances }),
-    ...(colliders === undefined || colliders.length === 0 ? {} : { colliders }),
-    /*
-     * The rig, where the source carried one. Spread conditionally like every optional field beside
-     * it, so a static model writes the same bytes it always did — which is what keeps `bake:check`
-     * meaningful and what makes 1.6 additive in practice rather than only on paper.
-     */
-    ...(skins === undefined || skins.length === 0 ? {} : { skins }),
-    ...(clips === undefined || clips.length === 0 ? {} : { clips }),
-    /*
-     * The asset's own hierarchy, where the reader found one, as `NODE`.
-     *
-     * **Written beside world-space meshes and never instead of them.** §4.4 rule 4 forbids
-     * changing what an existing byte means, so the geometry above is the same geometry it has
-     * always been and this chunk is additive: a reader that predates it skips it under rule 2 and
-     * opens the file as the static model it also is. A reader that knows it calls `localiseNodes`
-     * and gets parts it can move. Spread conditionally like every optional field beside it, so a
-     * format carrying no hierarchy writes exactly the bytes it always did.
-     */
-    ...(turnedNodes === undefined || turnedNodes.length === 0 ? {} : { nodes: turnedNodes }),
-    /* The authored lamps, turned with the geometry, as `LITE`. */
-    ...(lights === undefined || lights.length === 0
-      ? {}
-      : { lights: up === null || up === '+y' ? lights : orientLights(lights, up) }),
-    ...(levels.length === 0 ? {} : { levels }),
-    ...(embedded.length === 0 ? {} : { textures: embedded }),
+    blendAsCutout: args.includes('--blend-as-cutout'),
+    ...(simplifyError === undefined ? {} : { simplify: simplifyError }),
+    ...(sdfVoxel === undefined ? {} : { sdf: sdfVoxel }),
+  };
+  const source = await bakeModel(imported, options, {
+    log: (line) => console.log(line),
+    warn: (line) => console.warn(line),
+    textures: (refs, materials, warnings) =>
+      textured(
+        embedTextures(
+          refs,
+          chosen,
+          stat.isDirectory() ? input : path.dirname(chosen),
+          decodeDds,
+          warnings,
+        ),
+        materials,
+        warnings,
+      ),
+    levels: () => bakeLevels(chosen, siblings, args, up, quantise, decodeDds, textured),
+    colliders: (meshes) => bakeColliders(colliderMode, chosen, siblings, meshes, up),
   });
+
+  const output =
+    outIndex === -1
+      ? `${path.basename(chosen, path.extname(chosen))}.drft`
+      : (args[outIndex + 1] as string);
+  const buffer = writeDrft(source);
   writeFileSync(output, Buffer.from(buffer));
 
+  const written = source.meshes as readonly MeshData[];
+  const lights = source.lights;
   const vertices = written.reduce((sum, mesh) => sum + mesh.positions.length / 3, 0);
   const triangles = written.reduce((sum, mesh) => sum + mesh.indices.length / 3, 0);
   console.log(
-    `${meshes.length} mesh${meshes.length === 1 ? '' : 'es'}, ${vertices} vertices, ` +
+    `${written.length} mesh${written.length === 1 ? '' : 'es'}, ${vertices} vertices, ` +
       `${triangles} triangles → ${output} (${(buffer.byteLength / 1024).toFixed(1)} KB)`,
   );
   if (lights !== undefined && lights.length > 0) {

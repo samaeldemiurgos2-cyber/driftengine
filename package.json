@@ -1,7 +1,7 @@
 {
   "name": "@driftengine/workspace",
   "private": true,
-  "version": "4.13.6",
+  "version": "4.14.0",
   "license": "Apache-2.0",
   "type": "module",
   "workspaces": [
@@ -26,6 +26,7 @@
     "manual:sync": "node scripts/manual-sync.mjs",
     "create:templates": "node scripts/create-templates.mjs",
     "bake": "npx tsx --conditions=drift-source scripts/bake.ts",
+    "export": "npx tsx --conditions=drift-source scripts/drft-export.ts",
     "sprawl:bake": "npx tsx --conditions=drift-source demo/sprawl/bake/main.ts",
     "district:bake": "node --max-old-space-size=26000 ./node_modules/.bin/tsx --conditions=drift-source demo/district/bake/main.ts",
     "district:movers": "node --max-old-space-size=20000 ./node_modules/.bin/tsx --conditions=drift-source demo/district/bake/movers.ts",
@@ -64,9 +65,9 @@
     "native:startup": "node demo/native/startup.mjs"
   },
   "devDependencies": {
-    "@driftengine/assets": "4.13.6",
-    "@driftengine/core": "4.13.6",
-    "@driftengine/drft": "4.13.6",
+    "@driftengine/assets": "4.14.0",
+    "@driftengine/core": "4.14.0",
+    "@driftengine/drft": "4.14.0",
     "@jsquash/jpeg": "1.6.0",
     "@types/node": "^26.2.0",
     "@webgpu/glslang": "^0.0.15",

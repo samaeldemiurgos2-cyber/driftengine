@@ -40,6 +40,8 @@ import { validateMeshData } from '@driftengine/drft';
 
 /** Attribute locations are fixed engine-wide (`layout(location = n)` in GLSL). */
 const ATTR_POSITION = 0;
+/** What the motion pass reads: positions, and a rig's two sets of joints and weights. */
+const MOTION_LOCATIONS: readonly number[] = [ATTR_POSITION, 11, 12, 14, 15];
 const ATTR_NORMAL = 1;
 const ATTR_COLOR = 2;
 const ATTR_EMISSIVE = 3;
@@ -119,6 +121,16 @@ export class Mesh {
   get streams(): { readonly positions: WebGLBuffer; readonly normals: WebGLBuffer } | null {
     return this.deformable;
   }
+  /**
+   * A dynamic mesh's positions as they stood before this frame's first rewrite, for the motion
+   * WebGL2's temporal resolve follows (`backend/webgl2/motionTarget.ts`). Made the first time one is
+   * kept, so a mesh that never moves under the resolve pays nothing.
+   */
+  private previousPositions: WebGLBuffer | null = null;
+  /** The frame that rewrite belongs to (`frameOfChange`), or -1 for none yet. */
+  changedFrame = -1;
+  /** A vertex array for the motion pass, without and with last frame's positions, made on demand. */
+  private motionArrays: (WebGLVertexArrayObject | null)[] = [null, null];
   /** The colour buffer, kept so `updateColors` can rewrite it. Null unless `dynamicColors`. */
   private readonly recolourable: WebGLBuffer | null = null;
   /** How many floats the position buffer holds, so an update of the wrong size is refused. */
@@ -475,6 +487,76 @@ export class Mesh {
     this.morph?.dispose(gl);
     for (const buffer of this.buffers) gl.deleteBuffer(buffer);
     gl.deleteVertexArray(this.vao);
+    for (const vao of this.motionArrays) if (vao !== null) gl.deleteVertexArray(vao);
+    if (this.previousPositions !== null) gl.deleteBuffer(this.previousPositions);
+  }
+
+  /**
+   * Keep this dynamic mesh's positions as they stand, before a rewrite: one buffer copy on the
+   * device. The caller decides whether this rewrite is the frame's first (`keepsPrevious`).
+   */
+  keepPrevious(gl: WebGL2RenderingContext): void {
+    const deformable = this.deformable;
+    if (deformable === null) return;
+    const bytes = this.positionFloats * 4;
+    if (this.previousPositions === null) {
+      const buffer = gl.createBuffer();
+      if (buffer === null) throw new Error('createBuffer failed');
+      gl.bindBuffer(gl.COPY_WRITE_BUFFER, buffer);
+      gl.bufferData(gl.COPY_WRITE_BUFFER, bytes, gl.DYNAMIC_COPY);
+      this.previousPositions = buffer;
+    }
+    gl.bindBuffer(gl.COPY_READ_BUFFER, deformable.positions);
+    gl.bindBuffer(gl.COPY_WRITE_BUFFER, this.previousPositions);
+    gl.copyBufferSubData(gl.COPY_READ_BUFFER, gl.COPY_WRITE_BUFFER, 0, 0, bytes);
+    gl.bindBuffer(gl.COPY_READ_BUFFER, null);
+    gl.bindBuffer(gl.COPY_WRITE_BUFFER, null);
+  }
+
+  /** Whether last frame's positions have been kept: a dynamic mesh rewritten under the resolve. */
+  get keptPrevious(): boolean {
+    return this.previousPositions !== null;
+  }
+
+  /**
+   * Draw this mesh for the motion pass: its positions at 0, last frame's at 1 where `previous` asks
+   * and they were kept, and its rig's influences where `flat`'s skinning reads them, 11, 12, 14 and
+   * 15. A vertex array of its own, made once a variant, so the one the lit pass draws with is never
+   * touched.
+   */
+  drawMotion(gl: WebGL2RenderingContext, previous: boolean): void {
+    const at = previous && this.previousPositions !== null ? 1 : 0;
+    let vao = this.motionArrays[at] ?? null;
+    if (vao === null) {
+      vao = gl.createVertexArray();
+      if (vao === null) throw new Error('createVertexArray failed');
+      gl.bindVertexArray(vao);
+      for (const attribute of this.layout) {
+        if (!MOTION_LOCATIONS.includes(attribute.location)) continue;
+        gl.bindBuffer(gl.ARRAY_BUFFER, attribute.buffer);
+        gl.enableVertexAttribArray(attribute.location);
+        gl.vertexAttribPointer(
+          attribute.location,
+          attribute.size,
+          attribute.type,
+          attribute.normalized,
+          0,
+          0,
+        );
+      }
+      if (at === 1 && this.previousPositions !== null) {
+        gl.bindBuffer(gl.ARRAY_BUFFER, this.previousPositions);
+        gl.enableVertexAttribArray(1);
+        gl.vertexAttribPointer(1, 3, gl.FLOAT, false, 0, 0);
+      }
+      gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, this.indexBuffer);
+      gl.bindVertexArray(null);
+      gl.bindBuffer(gl.ARRAY_BUFFER, null);
+      this.motionArrays[at] = vao;
+    }
+    gl.bindVertexArray(vao);
+    gl.drawElements(gl.TRIANGLES, this.indexCount, this.indexType, 0);
+    gl.bindVertexArray(null);
   }
 
   /**

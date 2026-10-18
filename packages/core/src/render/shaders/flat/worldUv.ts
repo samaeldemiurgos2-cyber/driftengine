@@ -28,7 +28,7 @@ bool triplanar() { return false; }
 vec2 planarAt() { return vec2(0.0); }
 vec4 triplanarAlbedo(float layer) { return vec4(0.0); }
 vec3 triplanarOrm(float layer) { return vec3(0.0); }
-vec3 triplanarEmissive(float layer) { return vec3(0.0); }
+vec3 triplanarEmissive(float layer, vec2 shift) { return vec3(0.0); }
 vec3 triplanarNormal(vec3 n, float layer) { return n; }
 `;
   }
@@ -76,12 +76,13 @@ vec3 triplanarOrm(float layer) {
     texture(uOrmMap, vec3(p.xz, layer)).rgb * w.y + texture(uOrmMap, vec3(p.xy, layer)).rgb * w.z;
 }
 
-vec3 triplanarEmissive(float layer) {
+/* The emissive map on the three planes, each moved by the scroll: emissiveFlow.ts. */
+vec3 triplanarEmissive(float layer, vec2 shift) {
   vec3 w = triplanarWeights();
   vec3 p = vWorldPos * uWorldUv.y;
-  return texture(uEmissiveMap, vec3(p.zy, layer)).rgb * w.x +
-    texture(uEmissiveMap, vec3(p.xz, layer)).rgb * w.y +
-    texture(uEmissiveMap, vec3(p.xy, layer)).rgb * w.z;
+  return texture(uEmissiveMap, vec3(p.zy + shift, layer)).rgb * w.x +
+    texture(uEmissiveMap, vec3(p.xz + shift, layer)).rgb * w.y +
+    texture(uEmissiveMap, vec3(p.xy + shift, layer)).rgb * w.z;
 }
 
 /* A tangent-space normal off the map, its z rebuilt where a two-channel map stored none. */

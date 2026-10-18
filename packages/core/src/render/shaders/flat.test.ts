@@ -164,7 +164,17 @@ test('an emissive colour replaces the albedo rather than tinting it', () => {
    * shade exactly as it did before the attribute existed, and a negative component is how
    * "none named" is spelled, because black is a colour a surface may legitimately want.
    */
-  expect(source).toContain('vec3 emissiveTint = vEmissiveColor.r < 0.0 ? albedo : vEmissiveColor;');
+  expect(source).toContain(
+    'vec3 emissiveTint = vEmissiveColor.r < 0.0 ? glowBase : vEmissiveColor;',
+  );
+  /*
+   * **And the colour it falls back to is the base colour before the frame's decals**, which mark
+   * what the surface is lit as and leave what it emits: a shadow laid on a lettered floor must not
+   * dim its lettering. Kept on the line before the decals, so nothing else lies between the two.
+   */
+  expect(source).toContain(
+    'vec3 glowBase = albedo; if (BASE_DECALS) albedo = baseDecals(albedo, vWorldPos, normalize(vNormal));',
+  );
 });
 
 test('a glowing surface is shadowed by lamps and by the sky', () => {

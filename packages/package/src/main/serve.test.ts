@@ -52,6 +52,11 @@ describe('contentTypeFor', () => {
     expect(contentTypeFor('/app/physics.wasm')).toBe('application/wasm');
   });
 
+  it('serves a movie as video, which a <video> seeks by range', () => {
+    expect(contentTypeFor('/app/movies/01.mp4')).toBe('video/mp4');
+    expect(contentTypeFor('/app/intro.webm')).toBe('video/webm');
+  });
+
   /* The container and every asset: octet-stream is correct for these rather than a fallback. */
   it('serves anything it does not recognise as bytes', () => {
     expect(contentTypeFor('/app/day-23.drft')).toBe('application/octet-stream');

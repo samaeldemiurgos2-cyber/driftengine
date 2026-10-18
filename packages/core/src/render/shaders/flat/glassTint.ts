@@ -41,7 +41,10 @@ export type LitSwitch =
   | 'MOVING_SUN'
   | 'LAYERED'
   | 'LAYER_LOOKS'
-  | 'SURFACE_DETAIL';
+  | 'SURFACE_DETAIL'
+  | 'EMISSIVE_FLOW'
+  | 'IRIDESCENT_OVERLAY'
+  | 'BASE_DECALS';
 
 /** Every switch off: what a renderer starts from before its profile and its content say otherwise. */
 export function noLitSwitches(): Record<LitSwitch, boolean> {
@@ -59,6 +62,9 @@ export function noLitSwitches(): Record<LitSwitch, boolean> {
     LAYERED: false,
     LAYER_LOOKS: false,
     SURFACE_DETAIL: false,
+    EMISSIVE_FLOW: false,
+    IRIDESCENT_OVERLAY: false,
+    BASE_DECALS: false,
   };
 }
 

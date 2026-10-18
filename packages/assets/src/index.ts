@@ -199,6 +199,32 @@ export { readGltfSkins } from './gltfSkin.ts';
 export type { GltfAnimated, GltfSkin } from './gltfSkin.ts';
 
 /*
+ * **The way back out: a `.drft` as a glTF 2.0 binary**, so an asset baked for the engine opens in a
+ * modelling tool, is improved, and bakes again. What glTF has no field for rides in `extras.drift`
+ * records that `readModel` reads back as `ModelImport.carried`; `docs/FORMAT.md` §3 lists what
+ * survives exactly, what rounds, and what is not carried.
+ */
+export { drftToGlb } from './gltfExport.ts';
+export type { GlbExport, GlbExportOptions, PngEncoder } from './gltfExport.ts';
+export type { DrftCarried } from './gltfCarriedScene.ts';
+/*
+ * **`drft bake` as a function**, between the read and the write: what `scripts/bake.ts` runs, and
+ * what a test or a host with no filesystem runs to bake the way the command does rather than a copy
+ * of it. The command keeps only what needs a disk or a flag parser.
+ */
+export { bakeModel } from './bake/model.ts';
+export type { BakeModelHooks, BakeModelOptions } from './bake/model.ts';
+/* One of its steps on its own, for a host baking a separate level of detail the way the model is. */
+export { withTangentsIfMapped } from './bake/steps.ts';
+export {
+  describeDropped,
+  embedCarried,
+  identifyTexture,
+  placeholderTexture,
+  reachableTextures,
+} from './bake/textures.ts';
+
+/*
  * The tier 2 vehicle-container reader is deliberately **not** re-exported here.
  *
  * The barrel is the documented public surface, and `readModel` is how every format in this

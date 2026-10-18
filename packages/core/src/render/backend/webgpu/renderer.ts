@@ -125,7 +125,7 @@ import { ProbeSweeps } from '../../probeSweeps.ts';
 import { ggxMaxLevelFor, irradianceLevelFor, octahedralEdgeFor } from '../../prefilterEnvMap.ts';
 import { environmentTexels } from './environmentTexels.ts';
 import { packIesAtlas } from '../../iesProfile.ts';
-import { fixtureAtlasLayout, fixtureAtlasTexels } from '../../fixtureAtlas.ts';
+import { decalBandTop, fixtureAtlasLayout, fixtureAtlasTexels } from '../../fixtureAtlas.ts';
 import { resolveSurfaceScene } from '../../surfaceScene.ts';
 import { COOKIE_TILE } from '../../lightBudget.ts';
 import { FULL_LIGHT_BUDGET } from '../../uniformVectorBudget.ts';
@@ -192,6 +192,7 @@ import { GpuPointSkin, createPointSkinPipeline } from './pointSkinPass.ts';
 import {
   poseBounds,
   validatePointSkin,
+  validatePointSkinRange,
   validatePose,
   type PointSkinData,
 } from '../../pointSkin.ts';
@@ -232,6 +233,20 @@ import {
   type SurfaceDetail,
 } from '../../surfaceDetail.ts';
 import { LOOK_FLOATS, asksLayerLooks, packLayerLooks } from '../../surfaceLayerLooks.ts';
+import { EMISSIVE_FLOW_FLOATS, packEmissiveFlow } from '../../emissiveFlow.ts';
+import {
+  BASE_DECAL_FLOATS,
+  BASE_DECAL_TILE,
+  packBaseDecals,
+  type BaseDecal,
+} from '../../baseDecals.ts';
+import { sourceSize } from '../../textureSource.ts';
+import {
+  IRIDESCENT_FLOATS,
+  iridescentRefusal,
+  packIridescentOverlay,
+  type IridescentOverlay,
+} from '../../iridescentOverlay.ts';
 import {
   frameReflectionsRefused,
   resolveFrameReflections,
@@ -439,6 +454,7 @@ import {
 } from '../../lightBudget.ts';
 import { resolveRenderQuality, type RenderQuality } from '../../renderQuality.ts';
 import {
+  mediumSkyFill,
   DEFAULT_GLOBAL_MEDIUM,
   WEAK_GPU_MEDIUM_STEPS,
   createResolvedMediumLamps,
@@ -651,6 +667,8 @@ import { fitProbeGrid } from '../../gi/probeGridFit.ts';
  * `fitProbeGrid` widens it uniformly when the budget bites, so a large scene gets a coarser grid
  * rather than a truncated one.
  */
+/** The ambient a medium is lit by in a frame bound with no environment: none. */
+const MEDIUM_NO_AMBIENT: readonly number[] = [0, 0, 0];
 const INDIRECT_PROBE_SPACING = 2;
 
 /** What the trace is given when a frame never said what was lighting it. */
@@ -3057,6 +3075,12 @@ export class WebGPURenderer implements RendererApi {
   private warnedLayersModelMap = false;
   /** `uDetail`, the material's tiled detail packed by `packSurfaceDetail`. */
   private readonly detailFloats = new Float32Array(DETAIL_FLOATS);
+  /** `uEmissiveFlow`, a material's glow moved and masked, packed by `packEmissiveFlow`. */
+  private readonly flowFloats = new Float32Array(EMISSIVE_FLOW_FLOATS);
+  /** `uIridescence`, a material's iridescent overlay packed by `packIridescentOverlay`. */
+  private readonly iridescentFloats = new Float32Array(IRIDESCENT_FLOATS);
+  /** The refusals of an overlay already said, each once. */
+  private readonly warnedIridescent = new Set<string>();
   /** The detail refusals already said, each once. See `detailOfMaterial`. */
   private readonly warnedDetail = new Set<DetailRefusal>();
   private warnedLayersTriplanar = false;
@@ -3607,6 +3631,16 @@ export class WebGPURenderer implements RendererApi {
       f[emissive] = asked?.[0] ?? 1;
       f[emissive + 1] = asked?.[1] ?? 1;
       f[emissive + 2] = asked?.[2] ?? 1;
+      /* And its glow's scroll and mask, the first time a material asks: emissiveFlow.ts. */
+      if (packEmissiveFlow(material, this.flowFloats)) this.enableLit('EMISSIVE_FLOW');
+      f.set(this.flowFloats, this.materialField('uEmissiveFlow'));
+      /* And its iridescent overlay, the first time a material lays one: iridescentOverlay.ts. */
+      const iridescent = this.iridescentOf(material);
+      packIridescentOverlay(iridescent, material ?? {}, this.iridescentFloats);
+      f.set(this.iridescentFloats, this.materialField('uIridescence'));
+      /* And whether the frame's decals mark it. See `SurfaceMaterial.receivesDecals`. */
+      f[this.materialField('uDecalReceiver')] = material?.receivesDecals === false ? 1 : 0;
+      if (iridescent !== null) this.enableLit('IRIDESCENT_OVERLAY');
       /* The model's numbers and whether its map is bound. See `packModel`. */
       packModel(
         material?.model ?? null,
@@ -6426,6 +6460,21 @@ export class WebGPURenderer implements RendererApi {
   }
 
   /** One of the lit stage's switches on, in every cache a lit pipeline can come from. */
+  /** A material's iridescent overlay, or null where it is malformed, said once. */
+  private iridescentOf(
+    material: SurfaceMaterial<GpuSurfaceTexture> | null,
+  ): IridescentOverlay | null {
+    const overlay = material?.iridescentOverlay ?? null;
+    if (overlay === null) return null;
+    const refusal = iridescentRefusal(overlay);
+    if (refusal === null) return overlay;
+    if (!this.warnedIridescent.has(refusal)) {
+      this.warnedIridescent.add(refusal);
+      console.warn(`Renderer: an iridescent overlay is refused: ${refusal}. Drawn without it.`);
+    }
+    return null;
+  }
+
   private enableLit(feature: LitSwitch): void {
     if (this.pipelines.litSwitches[feature]) return;
     void this.pipelines.enable(feature);
@@ -7759,6 +7808,9 @@ export class WebGPURenderer implements RendererApi {
       { binding: TAA_TEXTURES.uFlicker },
       { binding: TAA_TEXTURES.uFlickerMotion },
       { binding: TAA_TEXTURES.uDepth, filterable: false },
+      /* WebGL2's movers' motion (`motionTarget.ts`); here the depth stands in and is never read,
+         `uMotionOn` being 0, since this backend follows movers through its reconstruction. */
+      { binding: TAA_TEXTURES.uMotion, filterable: false },
     ]);
     this.taaUniforms = device.createBuffer({
       label: 'post.taaUniforms',
@@ -8932,6 +8984,19 @@ export class WebGPURenderer implements RendererApi {
    * a destroyed buffer in a submit loses the whole command buffer. Nothing else reads them, so once
    * the rewrites are submitted, which only moves them earlier, the buffers can go at once.
    */
+  /**
+   * Rewrite part of a skin in place. **A pose already recorded is submitted first**, since a queue
+   * write reaches every dispatch submitted after it and would otherwise reach a pose the caller made
+   * before the rewrite; then the pose after it alone reads the rewrite, as on WebGL2. A rewrite with
+   * nothing pending submits nothing.
+   */
+  updatePointSkin(skin: GpuPointSkin, first: number, data: PointSkinData): void {
+    validatePointSkinRange(data, first, skin.mesh.vertexCount);
+    if (this.surface.lost) return;
+    if (this.pendingRewrites !== null) this.submit([]);
+    skin.rewrite(this.surface.device, first, data);
+  }
+
   disposePointSkin(skin: GpuPointSkin): void {
     if (this.pendingRewrites !== null && !this.surface.lost) this.submit([]);
     skin.dispose();
@@ -9094,6 +9159,13 @@ export class WebGPURenderer implements RendererApi {
     f.fill(0, at('uLayerLooks'), at('uLayerLooks') + LOOK_FLOATS);
     /* Nor detail. */
     f.fill(0, at('uDetail'), at('uDetail') + DETAIL_FLOATS);
+    /* Nor a glow that moves or is masked. */
+    f.fill(0, at('uEmissiveFlow'), at('uEmissiveFlow') + EMISSIVE_FLOW_FLOATS);
+    /* Nor an iridescent overlay. */
+    f.fill(0, at('uIridescence'), at('uIridescence') + IRIDESCENT_FLOATS);
+    /* The frame's decals as last laid, held across passes, and every surface receiving them. */
+    f.set(this.baseDecalFloats, at('uBaseDecals'));
+    f[at('uDecalReceiver')] = 0;
     f[at('uCutout')] = 0;
     f[at('uCutout') + 1] = 0;
     this.cutoutResolveStaged = 'hard';
@@ -13840,6 +13912,8 @@ export class WebGPURenderer implements RendererApi {
       f[depthRow + 3] = 1;
     }
     f[at('uAntiFlicker')] = 1;
+    /* The camera's motion alone: this backend follows a mover through its reconstruction. */
+    f[at('uMotionOn')] = 0;
     device.queue.writeBuffer(this.taaUniforms, 0, this.taaStaging);
 
     const pass = encoder.beginRenderPass({
@@ -14330,7 +14404,7 @@ export class WebGPURenderer implements RendererApi {
     f.set(this.frameEye, at('uCameraPos'));
     f.set(env?.directionalDir ?? [0, 1, 0], at('uSunDir'));
     f.set(env?.directionalColor ?? [0, 0, 0], at('uSunColor'));
-    f.set(env?.ambient ?? [0, 0, 0], at('uAmbient'));
+    f.set(mediumSkyFill(options, env?.ambient ?? MEDIUM_NO_AMBIENT), at('uAmbient'));
     f[at('uDensity')] = options.density;
     const height = at('uHeight');
     f[height] = options.heightFalloff;
@@ -17647,6 +17721,14 @@ export class WebGPURenderer implements RendererApi {
   /** The profiles as packed and the cookie images, kept so either can rebuild the atlas. */
   private iesAtlas = packIesAtlas([]);
   private cookieImages: readonly TexImageSource[] = [];
+  /** The images the frame's base decals lay, in the atlas's band of them. See `setBaseDecalImages`. */
+  private decalImages: readonly TexImageSource[] = [];
+  /** The decals as last laid, packed again whenever the cookies move their band. */
+  private baseDecalList: readonly BaseDecal[] = [];
+  /** `uBaseDecals`, held until the next `setBaseDecals`, across passes. */
+  private readonly baseDecalFloats = new Float32Array(BASE_DECAL_FLOATS);
+  /** The refusals of a decal or its image already said, each once. */
+  private readonly warnedBaseDecals = new Set<string>();
   /** The scene's DriftLight field, and its two volumes once it is whole. See `createLightField`. */
   private lightField: DriftLightVolumes | null = null;
   private driftIndex: GPUTexture | null = null;
@@ -18198,6 +18280,78 @@ export class WebGPURenderer implements RendererApi {
     this.cookieImages = images.slice();
     this.forgetFixtureAtlas();
     this.rebuildFlatBindGroup();
+    /* The decals' band starts below the cookies, so their rows move with them. */
+    if (this.baseDecalList.length > 0) this.setBaseDecals(this.baseDecalList);
+  }
+
+  /**
+   * The images the frame's base decals lay, each a `BASE_DECAL_TILE` square. The same count again
+   * copies the squares into the atlas and nothing else; a different count builds it again. See
+   * `renderer.ts` and `baseDecals.ts`. **Once a frame, before the draws they mark**: a copy reaches
+   * every draw of the frame it is made in, as any queue write does.
+   */
+  setBaseDecalImages(images: readonly TexImageSource[]): void {
+    if (this.surface.lost) return;
+    if (images.length === this.decalImages.length && this.fixtureTexture !== null) {
+      this.decalImages = images;
+      this.copyDecalImages(this.fixtureTexture);
+      return;
+    }
+    this.decalImages = images.slice();
+    this.forgetFixtureAtlas();
+    this.rebuildFlatBindGroup();
+    this.setBaseDecals(this.baseDecalList);
+  }
+
+  /** The decal images into their squares of the atlas. */
+  private copyDecalImages(texture: GPUTexture): void {
+    const top = decalBandTop(this.cookieImages.length);
+    for (let tile = 0; tile < this.decalImages.length; tile++) {
+      const source = this.decalImages[tile];
+      if (source === undefined || !this.decalImageFits(source)) continue;
+      this.surface.device.queue.copyExternalImageToTexture(
+        { source: source as GPUCopyExternalImageSource },
+        { texture, origin: { x: tile * BASE_DECAL_TILE, y: top } },
+        { width: BASE_DECAL_TILE, height: BASE_DECAL_TILE },
+      );
+    }
+  }
+
+  /** Whether an image is a decal's square, said once where it is not. */
+  private decalImageFits(image: TexImageSource): boolean {
+    const { width, height } = sourceSize(image);
+    if (width === BASE_DECAL_TILE && height === BASE_DECAL_TILE) return true;
+    const refusal =
+      `a base decal image of ${width} by ${height}; it is a square of ${BASE_DECAL_TILE} ` +
+      'texels, and is left clear';
+    if (!this.warnedBaseDecals.has(refusal)) {
+      this.warnedBaseDecals.add(refusal);
+      console.warn(`WebGPU: ${refusal}.`);
+    }
+    return false;
+  }
+
+  /**
+   * The decals laid into the base colours of the draws after it, until the next call, across
+   * passes. In the material block, as the overlay is, and written again where each pass starts it.
+   * See `renderer.ts` and `baseDecals.ts`.
+   */
+  setBaseDecals(decals: readonly BaseDecal[]): void {
+    if (this.surface.lost) return;
+    this.baseDecalList = decals;
+    const refusal = packBaseDecals(
+      decals,
+      this.decalImages.length,
+      decalBandTop(this.cookieImages.length),
+      this.baseDecalFloats,
+    );
+    if (refusal !== null && !this.warnedBaseDecals.has(refusal)) {
+      this.warnedBaseDecals.add(refusal);
+      console.warn(`WebGPU: ${refusal}.`);
+    }
+    if ((this.baseDecalFloats[0] as number) > 0) this.enableLit('BASE_DECALS');
+    this.perFrameFloats.set(this.baseDecalFloats, this.materialField('uBaseDecals'));
+    this.materials.dirty();
   }
 
   /** Let the atlas go, to be built again from what is in hand the next time it is bound. */
@@ -18218,7 +18372,11 @@ export class WebGPURenderer implements RendererApi {
   private fixtureAtlasView(): GPUTextureView {
     if (this.fixtureView !== null) return this.fixtureView;
     const { device } = this.surface;
-    const layout = fixtureAtlasLayout(this.iesAtlas.height, this.cookieImages.length);
+    const layout = fixtureAtlasLayout(
+      this.iesAtlas.height,
+      this.cookieImages.length,
+      this.decalImages.length,
+    );
     const texture = device.createTexture({
       label: 'fixture.atlas',
       size: [layout.width, layout.height],
@@ -18241,6 +18399,7 @@ export class WebGPURenderer implements RendererApi {
         { width: COOKIE_TILE, height: COOKIE_TILE },
       );
     }
+    this.copyDecalImages(texture);
     this.fixtureTexture = texture;
     this.fixtureView = texture.createView();
     this.iesRows = this.iesAtlas.height;
@@ -19039,6 +19198,7 @@ export class WebGPURenderer implements RendererApi {
           ...entry(TAA_TEXTURES.uFlicker, record),
           ...entry(TAA_TEXTURES.uFlickerMotion, motion),
           ...entry(TAA_TEXTURES.uDepth, this.resolvedDepthView, true),
+          ...entry(TAA_TEXTURES.uMotion, this.resolvedDepthView, true),
         ],
       });
     }

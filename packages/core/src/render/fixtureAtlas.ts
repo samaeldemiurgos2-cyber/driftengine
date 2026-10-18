@@ -1,6 +1,9 @@
 /**
  * What a light fixture throws, in one texture: its spot cookies in the top band, its photometric
- * profiles in the rows below.
+ * profiles in the rows below. And between the two, since the lit stage had no binding left for them
+ * either, the images of the decals laid into base colours (`baseDecals.ts`), a band of squares a
+ * frame may rewrite; each band is found from its own end or its own row, so the others' lookups are
+ * as they were.
  *
  * **One binding for two tables, because the lit stage had one sampler left.** The cookie atlas and
  * the photometric atlas were two small float textures read with `textureLod`, and the widest lit
@@ -19,24 +22,40 @@
  */
 import { IES_ATLAS_WIDTH } from './iesProfile.ts';
 import { COOKIE_TILE } from './lightBudget.ts';
+import { BASE_DECAL_TILE } from './baseDecals.ts';
 
 export interface FixtureAtlasLayout {
   readonly width: number;
   readonly height: number;
   /** Rows of cookie tiles at the top: `COOKIE_TILE`, or 0 with none loaded. */
   readonly cookieRows: number;
-  /** The first row of the profiles, below the cookies. */
+  /** The first row of the decals' images, below the cookies, and how many rows they take. */
+  readonly decalTop: number;
+  readonly decalRows: number;
+  /** The first row of the profiles, below the cookies and the decals. */
   readonly iesTop: number;
 }
 
-/** The atlas for `iesRows` rows of profile and `cookieTiles` cookies. */
-export function fixtureAtlasLayout(iesRows: number, cookieTiles: number): FixtureAtlasLayout {
+/** The row the decals' band starts at: below the cookies, which are there or are not. */
+export function decalBandTop(cookieTiles: number): number {
+  return cookieTiles > 0 ? COOKIE_TILE : 0;
+}
+
+/** The atlas for `iesRows` rows of profile, `cookieTiles` cookies and `decalTiles` decal images. */
+export function fixtureAtlasLayout(
+  iesRows: number,
+  cookieTiles: number,
+  decalTiles = 0,
+): FixtureAtlasLayout {
   const cookieRows = cookieTiles > 0 ? COOKIE_TILE : 0;
+  const decalRows = decalTiles > 0 ? BASE_DECAL_TILE : 0;
   return {
-    width: Math.max(IES_ATLAS_WIDTH, COOKIE_TILE * cookieTiles),
-    height: cookieRows + iesRows,
+    width: Math.max(IES_ATLAS_WIDTH, COOKIE_TILE * cookieTiles, BASE_DECAL_TILE * decalTiles),
+    height: cookieRows + decalRows + iesRows,
     cookieRows,
-    iesTop: cookieRows,
+    decalTop: cookieRows,
+    decalRows,
+    iesTop: cookieRows + decalRows,
   };
 }
 

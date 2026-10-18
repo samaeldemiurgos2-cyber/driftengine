@@ -25,6 +25,9 @@ import { reflectionSurfaceGlsl } from './reflectionSurface.ts';
 import { worldUvGlsl } from './worldUv.ts';
 import { movingSunGlsl } from './movingSun.ts';
 import { detailGlsl } from './detail.ts';
+import { emissiveFlowGlsl } from './emissiveFlow.ts';
+import { iridescentOverlayGlsl } from './iridescentOverlay.ts';
+import { baseDecalsGlsl } from './baseDecals.ts';
 import { layeredGlsl } from './layered.ts';
 import { MAP_READS_GLSL } from './mapReads.ts';
 import { CHANNEL_BEND, LIT_CHANNEL_ATTRIBUTE } from '../vertexChannel.ts';
@@ -546,6 +549,22 @@ export interface FlatShaderOptions {
    */
   readonly surfaceDetail?: boolean;
   /**
+   * Whether it moves and masks a material's glow, `uEmissiveFlow` and all
+   * (`SurfaceMaterial.emissiveScroll` and `emissiveMaskLayer`). True when absent. See
+   * `emissiveFlowGlsl`.
+   */
+  readonly emissiveFlow?: boolean;
+  /**
+   * Whether it lays a material's iridescent overlay on the base colour, `uIridescence` and all
+   * (`SurfaceMaterial.iridescentOverlay`). True when absent. See `iridescentOverlayGlsl`.
+   */
+  readonly iridescentOverlay?: boolean;
+  /**
+   * Whether it lays the frame's decals into base colours, `uBaseDecals` and all
+   * (`setBaseDecals`). True when absent. See `baseDecalsGlsl`.
+   */
+  readonly baseDecals?: boolean;
+  /**
    * How many point lights this build declares room for. `MAX_POINT_LIGHTS` when absent.
    *
    * **Not a permutation axis and not a picture setting: a way to fit the uniform grid.** Ten of
@@ -700,6 +719,12 @@ export function flatFrag(options: FlatShaderOptions): string {
       layeredGlsl(options.layered ?? true, options.layerLooks ?? true),
       /* After the layers, so its switch takes the next id; main calls it. See detail.ts. */
       detailGlsl(options.surfaceDetail ?? true),
+      /* After the detail, so its switch takes the next id; the map reads call it. emissiveFlow.ts. */
+      emissiveFlowGlsl(options.emissiveFlow ?? true),
+      /* After the glow's flow, so its switch takes the next id; main calls it. iridescentOverlay.ts. */
+      iridescentOverlayGlsl(options.iridescentOverlay ?? true),
+      /* After the overlay, so its switch takes the next id; main calls it. baseDecals.ts. */
+      baseDecalsGlsl(options.baseDecals ?? true),
       /* Where each map is read, after both of the ways it can be read otherwise. See mapReads.ts. */
       MAP_READS_GLSL,
       /* After the frame and the projection it calls, unconditional for the same reason as the

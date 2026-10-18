@@ -7,6 +7,11 @@
  *     /pointSkin.html?mode=rest           the arm unposed, which the two posed pictures must not be
  *     /pointSkin.html?recon=1             with DriftTR, whose motion reads last frame's positions
  *     /pointSkin.html?backend=webgl2      the other backend, posed by transform feedback
+ *     /pointSkin.html?rewrite=grow        made with the hand on the elbow, then the hand's rings
+ *                                         rewritten in part at frame 30: must draw what `device` does
+ *     /pointSkin.html?rewrite=none        made the same way and never rewritten: the control
+ *     /pointSkin.html?rewrite=after       rewritten wrongly on the last frame after its pose, which
+ *                                         that frame must not show
  *
  * **What it proves.** An arm of three joints, a tube of rings, each vertex a point in the space of
  * each joint it follows, blended across the elbow and the wrist, bends by a fixed clock for sixty
@@ -86,6 +91,42 @@ function arm(): { mesh: MeshData; skin: PointSkinData } {
   };
 }
 
+/**
+ * The skin with the hand on the elbow: every influence of joint 2 moved to joint 1, its point
+ * measured from joint 1. So it names two joints where the arm names three, and a rewrite of the
+ * hand's rings has to grow the joints the device holds.
+ */
+function handOnElbow(skin: PointSkinData): PointSkinData {
+  const joints = skin.joints.slice();
+  const points = skin.points.slice();
+  for (let i = 0; i < joints.length; i++) {
+    if (joints[i] !== 2) continue;
+    joints[i] = 1;
+    points[i * 3] += ORIGINS[2] - ORIGINS[1];
+  }
+  return { ...skin, joints, points };
+}
+
+/** Vertices `first` onward of a skin, as a rewrite takes them. */
+function rangeOf(skin: PointSkinData, first: number): PointSkinData {
+  return {
+    joints: skin.joints.subarray(first * 4),
+    weights: skin.weights.subarray(first * 4),
+    points: skin.points.subarray(first * 12),
+    normals: skin.normals.subarray(first * 3),
+  };
+}
+
+/** The first vertex any part of the hand moves. */
+function firstOfHand(skin: PointSkinData): number {
+  for (let v = 0; v < skin.weights.length / 4; v++) {
+    for (let k = 0; k < 4; k++) {
+      if (skin.joints[v * 4 + k] === 2 && skin.weights[v * 4 + k] > 0) return v;
+    }
+  }
+  return 0;
+}
+
 /** Each joint's transform into model space at `time`: a shoulder, an elbow and a wrist that bend. */
 function poseAt(time: number, out: Float32Array): void {
   const shoulder = mat4.fromZRotation(mat4.create(), 0.4 * Math.sin(time * 2));
@@ -160,6 +201,7 @@ async function main(): Promise<void> {
   const canvas = document.getElementById('canvas') as HTMLCanvasElement;
   const stats = document.getElementById('stats') as HTMLElement;
   const mode = new URLSearchParams(location.search).get('mode') ?? 'device';
+  const rewrite = new URLSearchParams(location.search).get('rewrite');
   const created = await createRenderer(canvas, askedQuality(), DEV_RENDERER);
   await created.renderer.ready();
   const renderer: RendererApi = created.renderer;
@@ -185,7 +227,10 @@ async function main(): Promise<void> {
 
   const { mesh: data, skin } = arm();
   const mesh = renderer.createMesh(data, { dynamic: true });
-  const posed = mode === 'device' ? renderer.createPointSkin(mesh, skin) : null;
+  const elbow = handOnElbow(skin);
+  const hand = firstOfHand(skin);
+  const madeWith = rewrite === 'grow' || rewrite === 'none' ? elbow : skin;
+  const posed = mode === 'device' ? renderer.createPointSkin(mesh, madeWith) : null;
   const matrices = new Float32Array(48);
   const positions = new Float32Array(data.positions.length);
   const normals = new Float32Array(data.normals.length);
@@ -194,7 +239,13 @@ async function main(): Promise<void> {
   let frames = 0;
   const frame = (): void => {
     poseAt(frames / 60, matrices);
+    if (posed !== null && rewrite === 'grow' && frames === 30) {
+      renderer.updatePointSkin(posed, hand, rangeOf(skin, hand));
+    }
     if (posed !== null) renderer.posePointSkin(posed, matrices);
+    if (posed !== null && rewrite === 'after' && frames === FRAMES - 1) {
+      renderer.updatePointSkin(posed, hand, rangeOf(elbow, hand));
+    }
     if (mode === 'cpu') {
       poseOnCpu(skin, matrices, positions, normals);
       renderer.updateMesh(mesh, positions, normals);
@@ -205,7 +256,7 @@ async function main(): Promise<void> {
     renderer.endFrame();
     frames += 1;
     if (frames === FRAMES) {
-      stats.textContent = `${renderer.backend} ${mode}`;
+      stats.textContent = `${renderer.backend} ${mode} ${rewrite ?? ''} hand from ${hand}`;
       (window as unknown as { __pointSkinReady: boolean }).__pointSkinReady = true;
       return;
     }

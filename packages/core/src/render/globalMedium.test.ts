@@ -5,6 +5,7 @@ import {
   MAX_GLOBAL_MEDIUM_STEPS,
   createResolvedMediumLamps,
   mediumActive,
+  mediumSkyFill,
   mediumTargetSize,
   resolveGlobalMedium,
   resolveGlobalMediumSettings,
@@ -87,9 +88,31 @@ describe('the medium a caller asks for', () => {
     expect([layered.heightFalloff, layered.baseY]).toEqual([0.1, 3]);
     expect([layered.density2, layered.heightFalloff2, layered.baseY2]).toEqual([0.01, 0.02, -5]);
     expect([layered.sunScatter, layered.skyScatter, layered.lampScatter]).toEqual([5, 1, 2]);
+    /* The sky's fill is the frame's ambient unless the medium has one of its own. */
+    expect(layered.skyFill).toBeNull();
     /* A density that is not a number is none, in either form. */
     expect(resolveGlobalMediumSettings(Number.NaN).density).toBe(0);
     expect(resolveGlobalMediumSettings({ density: Number.NaN }).density).toBe(0);
+  });
+});
+
+describe("the sky's fill the medium scatters", () => {
+  /*
+   * **What a colour of its own is for**: a scene lit by a sky's cubemap and its probes keeps its
+   * flat ambient for what falls outside them, so the ambient is the wrong colour for the sky's light
+   * in the air, and setting it to the right one would relight those surfaces too.
+   */
+  it('IS THE FRAME’S AMBIENT UNLESS THE MEDIUM NAMES ONE, AND THEN ITS OWN', () => {
+    const ambient = [0.1, 0.2, 0.3];
+    expect(mediumSkyFill(resolveGlobalMedium({ density: 0.02 }), ambient)).toBe(ambient);
+    const own = resolveGlobalMedium({ density: 0.02, skyFill: [0.5, 0.6, 2] });
+    expect(own.skyFill).toEqual([0.5, 0.6, 2]);
+    expect(mediumSkyFill(own, ambient)).toEqual([0.5, 0.6, 2]);
+    /* Radiance, so above one is light; below zero or not a number is none. */
+    expect(resolveGlobalMedium({ density: 0.02, skyFill: [-1, Number.NaN, 3] }).skyFill).toEqual([
+      0, 0, 3,
+    ]);
+    expect(resolveGlobalMedium({ density: 0.02, skyFill: null }).skyFill).toBeNull();
   });
 });
 

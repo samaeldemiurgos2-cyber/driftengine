@@ -8,8 +8,9 @@
  * draw, last frame's palette.
  *
  * **Plain data, advanced by the renderer.** No renderer is needed to make one, so a consumer holds
- * it beside the object it belongs to. Only a reconstructing WebGPU renderer reads or writes it; it
- * costs nothing anywhere else. The fields past `kind` are the renderer's and a caller leaves them
+ * it beside the object it belongs to. A reconstructing WebGPU renderer reads and writes it, and so
+ * does a WebGL2 one resolving temporally (`backend/webgl2/motionTarget.ts`); it costs nothing
+ * anywhere else. The fields past `kind` are the renderer's and a caller leaves them
  * alone.
  *
  * **What would make this wrong** is a consumer whose objects are rebuilt every frame with no state

@@ -12,6 +12,7 @@ import type { SurfaceDetail } from './surfaceDetail.ts';
 import type { SurfaceLayers } from './surfaceLayers.ts';
 import type { SurfaceProjection } from './surfaceProjection.ts';
 import type { SurfaceModel } from './surfaceModel.ts';
+import type { IridescentOverlay } from './iridescentOverlay.ts';
 import { layerSize, refuseArrayUpdate, sourceSize } from './textureSource.ts';
 import {
   compressedLayers,
@@ -185,6 +186,37 @@ export interface SurfaceMaterial<Texture = SurfaceTexture> {
    * consumer who wants a bound map twice as bright asks here rather than rebuilding the mesh.
    */
   emissiveScale?: readonly [number, number, number];
+  /**
+   * How far the emissive map moves a second, in its own repeats on u and v, by
+   * `Environment.surfaceTime`: lava drifting through a rock's cracks, a band of light running along a
+   * sign. The emissive map alone moves; the albedo and the rest stay where they are. Absent, still.
+   * **A lit switch**, `EMISSIVE_FLOW`, compiled in the first time a material asks. See
+   * `emissiveFlow.ts`.
+   */
+  emissiveScroll?: readonly [number, number] | null;
+  /**
+   * Where a glow is kept: the layer of the `emissive` array whose **alpha** multiplies the emission,
+   * read at the mesh's own first coordinates, before `uScale`, `uOffset`, the layers or a
+   * projection, so a glow repeated eight times across a rock is held to cracks a map spanning the
+   * rock once draws. Alpha is never decoded as sRGB, so the mask is the number it was written as.
+   * A layer of the array is the array's size. Absent, the whole surface glows as it did. Read only
+   * where an `emissive` map is bound. The same switch as `emissiveScroll`.
+   */
+  emissiveMaskLayer?: number | null;
+  /**
+   * A hue that shifts with the view laid over the base colour before it is lit: a coat's sheen
+   * running through a spectrum as it turns, from a ramp of colours, a fixed direction the sheen
+   * turns toward, four numbers and a mask. Absent, the base colour as it is. **A lit switch**,
+   * `IRIDESCENT_OVERLAY`, compiled in the first time a material asks; thirty-six vectors, so WebGL2
+   * refuses it, said once, on a part whose lit stage has no room. See `iridescentOverlay.ts`.
+   */
+  iridescentOverlay?: IridescentOverlay | null;
+  /**
+   * Whether the frame's base decals mark this surface (`setBaseDecals`). **True by default**, every
+   * surface in a decal's box; false for one that stands in a decal's box and is not what it lands
+   * on, a body over the shadow it throws. Read only where a frame lays decals.
+   */
+  receivesDecals?: boolean;
   /**
    * How the surface answers light, when the standard model is not what it is made of: brushed
    * metal, hair, skin, an eye — `anisotropicModel`, `hairModel`, `skinModel`, `eyeModel`. Null or

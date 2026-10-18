@@ -28,6 +28,9 @@ const lit = (
   layered = false,
   layerLooks = false,
   surfaceDetail = false,
+  emissiveFlow = false,
+  iridescentOverlay = false,
+  baseDecals = false,
 ): string =>
   flatFrag({
     pointShadows: true,
@@ -40,6 +43,9 @@ const lit = (
     layered,
     layerLooks,
     surfaceDetail,
+    emissiveFlow,
+    iridescentOverlay,
+    baseDecals,
     maxLights: budget.maxLights,
     maxAreaLights: budget.maxAreaLights,
   });
@@ -118,6 +124,23 @@ describe('countUniformVectors', () => {
       countUniformVectors(lit(FULL_LIGHT_BUDGET, false, false, false, false, false, true)) -
         countUniformVectors(lit(FULL_LIGHT_BUDGET)),
     ).toBe(33);
+    /* A material's glow moved and masked, two: the scroll and mask, and the way back. emissiveFlow.ts. */
+    expect(
+      countUniformVectors(lit(FULL_LIGHT_BUDGET, false, false, false, false, false, false, true)) -
+        countUniformVectors(lit(FULL_LIGHT_BUDGET)),
+    ).toBe(2);
+    /* A material's iridescent overlay, thirty-six: four of numbers and its ramp of thirty-two. */
+    expect(
+      countUniformVectors(
+        lit(FULL_LIGHT_BUDGET, false, false, false, false, false, false, false, true),
+      ) - countUniformVectors(lit(FULL_LIGHT_BUDGET)),
+    ).toBe(36);
+    /* The frame's base decals, thirty-four: a header, four a decal for eight, and the receiver. */
+    expect(
+      countUniformVectors(
+        lit(FULL_LIGHT_BUDGET, false, false, false, false, false, false, false, false, true),
+      ) - countUniformVectors(lit(FULL_LIGHT_BUDGET)),
+    ).toBe(34);
     const withoutPointShadows = flatFrag({
       pointShadows: false,
       directionalShadows: true,
@@ -128,6 +151,9 @@ describe('countUniformVectors', () => {
       movingSun: false,
       layered: false,
       surfaceDetail: false,
+      emissiveFlow: false,
+      iridescentOverlay: false,
+      baseDecals: false,
     });
     expect(countUniformVectors(withoutPointShadows)).toBe(249);
   });

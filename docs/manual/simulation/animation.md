@@ -153,6 +153,15 @@ any dynamic mesh, its shadow and its motion included, and the main thread hands 
 joints. The mesh's bounds become a box around each joint's reach, so it is culled as it moves
 without the posed vertices coming back to the CPU. `disposePointSkin` frees it.
 
+A skin that changes shape a few hundred vertices at a time, a hand closing or a picture on a face
+taken away, is rewritten in part rather than made again: `updatePointSkin(skin, first, data)` takes
+vertices `first` onward, as many as `data` holds, its four arrays a range's worth, and sends only
+those. The pose after it reads the rewrite and a pose before it does not, on both backends. The
+bounds take in what a rewrite reaches and never shrink, since the vertices it replaced may have
+been the farthest, so a skin that changes back and forth settles at the box of all its shapes;
+`createPointSkin` measures a skin afresh. A joint none of its vertices named before grows what the
+device holds for the joints, once.
+
 ## Clips
 
 ```ts sample=animation/main.ts#clips

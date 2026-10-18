@@ -20,7 +20,16 @@ import { maskOf } from '../../frame/resources.ts';
 /** The two copies a registered pass may declare it reads. See `drawPass`. */
 const COLOR_SNAPSHOT = maskOf('colorSnapshot');
 const DEPTH_SNAPSHOT = maskOf('depthSnapshot');
-import type { Mover } from '../../recon/mover.ts';
+import {
+  MOVER_MOTION,
+  MOVER_TWICE,
+  advanceMover,
+  claimRendererId,
+  isMover,
+  type Mover,
+} from '../../recon/mover.ts';
+import { frameOfChange, keepsPrevious } from '../../recon/changeFrames.ts';
+import { GlMotionPass } from './motionTarget.ts';
 import { resolveGlass } from '../../glass.ts';
 import type { GlassOptions, ResolvedGlass } from '../../glass.ts';
 import type { ClipControlExtension } from '../../depthConvention.ts';
@@ -132,6 +141,20 @@ import {
   type SurfaceDetail,
 } from '../../surfaceDetail.ts';
 import { LOOK_FLOATS, asksLayerLooks, packLayerLooks } from '../../surfaceLayerLooks.ts';
+import { EMISSIVE_FLOW_FLOATS, packEmissiveFlow } from '../../emissiveFlow.ts';
+import { sourceSize } from '../../textureSource.ts';
+import {
+  BASE_DECAL_FLOATS,
+  BASE_DECAL_TILE,
+  packBaseDecals,
+  type BaseDecal,
+} from '../../baseDecals.ts';
+import {
+  IRIDESCENT_FLOATS,
+  iridescentRefusal,
+  packIridescentOverlay,
+  type IridescentOverlay,
+} from '../../iridescentOverlay.ts';
 import type { SurfaceProjection } from '../../surfaceProjection.ts';
 import { FILM_FRAG, FILM_VERT } from '../../shaders/film.ts';
 import { SceneTarget } from '../../sceneTarget.ts';
@@ -230,7 +253,7 @@ import { ProbeSweeps } from '../../probeSweeps.ts';
 import { octahedralEdgeFor } from '../../prefilterEnvMap.ts';
 import { EnvironmentPrefilterPass } from '../../prefilterPass.ts';
 import { packIesAtlas } from '../../iesProfile.ts';
-import { fixtureAtlasLayout, fixtureAtlasTexels } from '../../fixtureAtlas.ts';
+import { decalBandTop, fixtureAtlasLayout, fixtureAtlasTexels } from '../../fixtureAtlas.ts';
 import { resolveSurfaceScene } from '../../surfaceScene.ts';
 import type { AreaLightBuffer, AreaLightSource } from '../../areaLights.ts';
 import { MAX_AREA_LIGHTS } from '../../areaLights.ts';
@@ -396,6 +419,7 @@ import { noLitSwitches, type LitSwitch } from '../../shaders/flat/glassTint.ts';
 import {
   poseBounds,
   validatePointSkin,
+  validatePointSkinRange,
   validatePose,
   type PointSkinData,
 } from '../../pointSkin.ts';
@@ -1745,6 +1769,17 @@ export class WebGL2Renderer implements RendererApi {
   private iesAtlas = packIesAtlas([]);
   /** The cookie images, kept so a new set of profiles can rebuild the atlas around them. */
   private cookieImages: readonly TexImageSource[] = [];
+  /** The images the frame's base decals lay, in the atlas's band of them. See `setBaseDecalImages`. */
+  private decalImages: readonly TexImageSource[] = [];
+  /** The decals as last laid, packed again whenever the atlas moves their band. */
+  private baseDecalList: readonly BaseDecal[] = [];
+  /** `uBaseDecals`, held until the next `setBaseDecals`, across passes. */
+  private readonly baseDecalFloats = new Float32Array(BASE_DECAL_FLOATS);
+  /** Whether the lit stage has room for base decals, asked once. */
+  private decalRoom: boolean | null = null;
+  private warnedDecalRoom = false;
+  /** The refusals of a decal or its image already said, each once. */
+  private readonly warnedBaseDecals = new Set<string>();
   /** Rows of profile in the atlas. One until a consumer loads a profile, which is the row of ones. */
   private iesRows = 1;
   /** Cookie tiles in the atlas. 0 is none, and the whole off path. */
@@ -1827,6 +1862,18 @@ export class WebGL2Renderer implements RendererApi {
   private warnedLooksRoom = false;
   /** `uDetail`, the material's tiled detail packed by `packSurfaceDetail`. */
   private readonly detailFloats = new Float32Array(DETAIL_FLOATS);
+  /** `uEmissiveFlow`, a material's glow moved and masked, packed by `packEmissiveFlow`. */
+  private readonly flowFloats = new Float32Array(EMISSIVE_FLOW_FLOATS);
+  /** Whether the lit stage has room for that, asked once. See `emissiveFlowFits`. */
+  private flowRoom: boolean | null = null;
+  private warnedFlowRoom = false;
+  /** `uIridescence`, a material's iridescent overlay packed by `packIridescentOverlay`. */
+  private readonly iridescentFloats = new Float32Array(IRIDESCENT_FLOATS);
+  /** Whether the lit stage has room for it, asked once. See `iridescentOf`. */
+  private iridescentRoom: boolean | null = null;
+  private warnedIridescentRoom = false;
+  /** The refusals of an overlay already said, each once. */
+  private readonly warnedIridescent = new Set<string>();
   /** Whether the lit stage has room for detail on this part, asked once. See `detailOfMaterial`. */
   private detailRoom: boolean | null = null;
   private warnedDetailRoom = false;
@@ -1990,6 +2037,19 @@ export class WebGL2Renderer implements RendererApi {
     return this.sceneViewProj as unknown as ReadonlyMat4;
   }
   private shadowPassActive = false;
+  /**
+   * The motion WebGL2's temporal resolve follows: the frame's movers, recorded as they are drawn and
+   * drawn into a target of their own at `endFrame`. See `motionTarget.ts`.
+   */
+  private readonly motionPass = new GlMotionPass();
+  /** Which renderer a `Mover` was last drawn by, and the frame serial it reads. See `mover.ts`. */
+  private readonly moverRenderer = claimRendererId();
+  private moverFrame = 0;
+  /** Between `beginFrame` and `endFrame`, which decides which frame a rewrite belongs to. */
+  private inFrame = false;
+  private readonly motionJittered = new Float32Array(16);
+  private warnedMoverTwice = false;
+  private warnedMotionUnkept = false;
   /** Non-zero while the drawing buffer is pinned; see `lockDrawingBuffer`. */
   private lockedWidth = 0;
   private lockedHeight = 0;
@@ -2711,11 +2771,109 @@ export class WebGL2Renderer implements RendererApi {
   setSpotCookies(images: readonly TexImageSource[]): void {
     this.cookieImages = images.slice();
     this.buildFixtureAtlas();
+    /* The decals' band starts below the cookies, so their rows move with them. */
+    if (this.baseDecalList.length > 0) this.setBaseDecals(this.baseDecalList);
   }
 
   setIesProfiles(profiles: readonly PhotometricProfile[]): void {
     this.iesAtlas = packIesAtlas(profiles);
     this.buildFixtureAtlas();
+  }
+
+  /**
+   * The images the frame's base decals lay, each a `BASE_DECAL_TILE` square, into the fixture
+   * atlas's band of them. **Once a frame is what this is for**: the same count again uploads the
+   * squares and nothing else, while a different count builds the atlas again. An image of another
+   * size is refused, said once, and its square left clear. See `baseDecals.ts`.
+   */
+  setBaseDecalImages(images: readonly TexImageSource[]): void {
+    if (this.contextLost) return;
+    if (images.length === this.decalImages.length && this.fixtureTexture !== null) {
+      this.decalImages = images;
+      const { gl } = this;
+      gl.activeTexture(gl.TEXTURE0 + FIXTURE_ATLAS_TEXTURE_UNIT);
+      gl.bindTexture(gl.TEXTURE_2D, this.fixtureTexture);
+      this.uploadDecalImages();
+      gl.bindTexture(gl.TEXTURE_2D, null);
+      gl.activeTexture(gl.TEXTURE0);
+      return;
+    }
+    this.decalImages = images.slice();
+    this.buildFixtureAtlas();
+    this.setBaseDecals(this.baseDecalList);
+  }
+
+  /** The decal images into their squares of the atlas bound on the fixture unit. */
+  private uploadDecalImages(): void {
+    const { gl } = this;
+    for (let tile = 0; tile < this.decalImages.length; tile++) {
+      const image = this.decalImages[tile];
+      if (image === undefined || !this.decalImageFits(image)) continue;
+      gl.texSubImage2D(
+        gl.TEXTURE_2D,
+        0,
+        tile * BASE_DECAL_TILE,
+        decalBandTop(this.cookieImages.length),
+        gl.RGBA,
+        gl.HALF_FLOAT,
+        image,
+      );
+    }
+  }
+
+  /** Whether an image is a decal's square, said once where it is not. */
+  private decalImageFits(image: TexImageSource): boolean {
+    const { width, height } = sourceSize(image);
+    if (width === BASE_DECAL_TILE && height === BASE_DECAL_TILE) return true;
+    const refusal =
+      `a base decal image of ${width} by ${height}; it is a square of ${BASE_DECAL_TILE} ` +
+      'texels, and is left clear';
+    if (!this.warnedBaseDecals.has(refusal)) {
+      this.warnedBaseDecals.add(refusal);
+      console.warn(`Renderer: ${refusal}.`);
+    }
+    return false;
+  }
+
+  /**
+   * The decals laid into the base colours of the draws after it, until the next call, across
+   * passes: each a box, an image of `setBaseDecalImages` and how much of it. **Refused, said once,
+   * where the lit stage has no room** for their thirty-four vectors, and the draws are then marked
+   * by none. See `baseDecals.ts`.
+   */
+  setBaseDecals(decals: readonly BaseDecal[]): void {
+    if (this.contextLost) return;
+    this.baseDecalList = decals;
+    if (decals.length > 0 && !this.baseDecalsFit()) {
+      this.baseDecalFloats.fill(0);
+    } else {
+      const refusal = packBaseDecals(
+        decals,
+        this.decalImages.length,
+        decalBandTop(this.cookieImages.length),
+        this.baseDecalFloats,
+      );
+      if (refusal !== null && !this.warnedBaseDecals.has(refusal)) {
+        this.warnedBaseDecals.add(refusal);
+        console.warn(`Renderer: ${refusal}.`);
+      }
+      if ((this.baseDecalFloats[0] as number) > 0) this.askLit('BASE_DECALS');
+    }
+    this.materials.dirty();
+    this.writeFlatVector('uBaseDecals', this.baseDecalFloats);
+  }
+
+  private baseDecalsFit(): boolean {
+    this.decalRoom ??= this.switchFits('BASE_DECALS');
+    if (!this.decalRoom && !this.warnedDecalRoom) {
+      this.warnedDecalRoom = true;
+      console.warn(
+        'Renderer: base decals are refused on this device. They take thirty-four fragment uniform ' +
+          'vectors the lit shader does not have, so nothing is marked. A lower `maxLights` makes ' +
+          'the room, or WebGPU has it.',
+      );
+    }
+    return this.decalRoom;
   }
 
   /**
@@ -2729,7 +2887,11 @@ export class WebGL2Renderer implements RendererApi {
    */
   private buildFixtureAtlas(): void {
     const { gl } = this;
-    const layout = fixtureAtlasLayout(this.iesAtlas.height, this.cookieImages.length);
+    const layout = fixtureAtlasLayout(
+      this.iesAtlas.height,
+      this.cookieImages.length,
+      this.decalImages.length,
+    );
     if (this.fixtureTexture === null) this.fixtureTexture = gl.createTexture();
     gl.activeTexture(gl.TEXTURE0 + FIXTURE_ATLAS_TEXTURE_UNIT);
     gl.bindTexture(gl.TEXTURE_2D, this.fixtureTexture);
@@ -2749,6 +2911,7 @@ export class WebGL2Renderer implements RendererApi {
       if (image === undefined) continue;
       gl.texSubImage2D(gl.TEXTURE_2D, 0, tile * COOKIE_TILE, 0, gl.RGBA, gl.HALF_FLOAT, image);
     }
+    this.uploadDecalImages();
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
@@ -3547,6 +3710,7 @@ export class WebGL2Renderer implements RendererApi {
 
     const { gl } = this;
     if (!this.contextLost) this.skinScatter?.dispose();
+    if (!this.contextLost) this.motionPass.dispose(gl);
     this.detachContextLoss();
     this.contextLostListeners.length = 0;
     this.contextRestoredListeners.length = 0;
@@ -3738,6 +3902,7 @@ export class WebGL2Renderer implements RendererApi {
    * buffer is the same buffer. Rebinding here would cost a state change for nothing.
    */
   updateMesh(mesh: Mesh, positions: Float32Array, normals?: Float32Array): void {
+    if (!this.contextLost) this.keepPositionsBefore(mesh);
     mesh.update(this.gl, positions, normals);
   }
 
@@ -3769,7 +3934,18 @@ export class WebGL2Renderer implements RendererApi {
     validatePose(matrices, skin.reach);
     if (this.contextLost || this.pointSkinPose === null) return;
     poseBounds(matrices, skin.reach, skin.mesh.bounds);
+    this.keepPositionsBefore(skin.mesh);
     skin.pose(this.gl, this.pointSkinPose, matrices);
+  }
+
+  /**
+   * Rewrite part of a skin in place. A command in the stream like a pose, so the pose after it reads
+   * the rewrite. See `GlPointSkin.rewrite`.
+   */
+  updatePointSkin(skin: GlPointSkin, first: number, data: PointSkinData): void {
+    validatePointSkinRange(data, first, skin.mesh.vertexCount);
+    if (this.contextLost) return;
+    skin.rewrite(this.gl, first, data);
   }
 
   disposePointSkin(skin: GlPointSkin): void {
@@ -4473,6 +4649,20 @@ export class WebGL2Renderer implements RendererApi {
       emissiveScale?.[1] ?? 1,
       emissiveScale?.[2] ?? 1,
     );
+    /* And its glow's scroll and mask, where the lit stage has room for them: emissiveFlow.ts. */
+    if (packEmissiveFlow(material, this.flowFloats) && this.emissiveFlowFits()) {
+      this.askLit('EMISSIVE_FLOW');
+    } else {
+      this.flowFloats.fill(0, 0, 4);
+    }
+    gl.uniform4fv(u['uEmissiveFlow'] ?? null, this.flowFloats);
+    /* And its iridescent overlay, where it can be drawn: iridescentOverlay.ts. */
+    const iridescent = this.iridescentOf(material);
+    packIridescentOverlay(iridescent, material ?? {}, this.iridescentFloats);
+    if (iridescent !== null) this.askLit('IRIDESCENT_OVERLAY');
+    gl.uniform4fv(u['uIridescence'] ?? null, this.iridescentFloats);
+    /* And whether the frame's decals mark it. See `SurfaceMaterial.receivesDecals`. */
+    gl.uniform4f(u['uDecalReceiver'] ?? null, material?.receivesDecals === false ? 1 : 0, 0, 0, 0);
 
     /*
      * **The scale belongs to the material, not to the albedo.** It was uploaded on the albedo
@@ -4714,6 +4904,53 @@ export class WebGL2Renderer implements RendererApi {
   private overlayFits(): boolean {
     this.overlayRoom ??= this.switchFits('SURFACE_OVERLAY');
     return this.overlayRoom;
+  }
+
+  /**
+   * A material's iridescent overlay, or null where it is refused: malformed, or the lit stage has no
+   * room for its thirty-six vectors. Each said once.
+   */
+  private iridescentOf(material: SurfaceMaterial | null): IridescentOverlay | null {
+    const overlay = material?.iridescentOverlay ?? null;
+    if (overlay === null) return null;
+    const refusal = iridescentRefusal(overlay);
+    if (refusal !== null) {
+      if (!this.warnedIridescent.has(refusal)) {
+        this.warnedIridescent.add(refusal);
+        console.warn(`Renderer: an iridescent overlay is refused: ${refusal}. Drawn without it.`);
+      }
+      return null;
+    }
+    this.iridescentRoom ??= this.switchFits('IRIDESCENT_OVERLAY');
+    if (this.iridescentRoom) return overlay;
+    if (!this.warnedIridescentRoom) {
+      this.warnedIridescentRoom = true;
+      console.warn(
+        "Renderer: a material's iridescent overlay is refused on this device. It takes thirty-six " +
+          'fragment uniform vectors the lit shader does not have, so the material is drawn without ' +
+          'it. A lower `maxLights` makes the room, or WebGPU has it.',
+      );
+    }
+    return null;
+  }
+
+  /**
+   * Whether a material's glow can be moved and masked: the lit stage has room for its two vectors.
+   * **Refused, said once, where it has not**, and the glow is then drawn still and unmasked, as it
+   * was before it existed.
+   */
+  private emissiveFlowFits(): boolean {
+    this.flowRoom ??= this.switchFits('EMISSIVE_FLOW');
+    if (!this.flowRoom && !this.warnedFlowRoom) {
+      this.warnedFlowRoom = true;
+      console.warn(
+        "Renderer: a material's emissive scroll and mask are refused on this device. They take " +
+          'two fragment uniform vectors and the lit shader already uses all ' +
+          `${this.fragmentVectorLimit()} this GPU offers; the glow is drawn still and unmasked. ` +
+          'A lower `maxLights` makes the room, or WebGPU has it.',
+      );
+    }
+    return this.flowRoom;
   }
 
   /**
@@ -7215,6 +7452,9 @@ export class WebGL2Renderer implements RendererApi {
       layered: asIf.LAYERED ?? this.litOn.LAYERED,
       layerLooks: asIf.LAYER_LOOKS ?? this.litOn.LAYER_LOOKS,
       surfaceDetail: asIf.SURFACE_DETAIL ?? this.litOn.SURFACE_DETAIL,
+      emissiveFlow: asIf.EMISSIVE_FLOW ?? this.litOn.EMISSIVE_FLOW,
+      iridescentOverlay: asIf.IRIDESCENT_OVERLAY ?? this.litOn.IRIDESCENT_OVERLAY,
+      baseDecals: asIf.BASE_DECALS ?? this.litOn.BASE_DECALS,
       maxLights: budget.maxLights,
       maxAreaLights: budget.maxAreaLights,
     });
@@ -8637,6 +8877,10 @@ export class WebGL2Renderer implements RendererApi {
     if (this.contextLost) return;
     /* One frame of the jitter's sequence however many times the frame binds its camera. */
     this.temporalHistory.nextFrame();
+    /* A frame states its movers afresh. See `motionTarget.ts`. */
+    this.moverFrame += 1;
+    this.inFrame = true;
+    this.motionPass.reset();
     this.skinScattered = false;
     this.skinScatter?.reset();
     if (this.litAsked) {
@@ -8727,6 +8971,8 @@ export class WebGL2Renderer implements RendererApi {
     if (this.viewModelActive) this.endViewModel();
     /* Skin not yet spread, because nothing blended came after it, is spread now. */
     this.scatterSkin();
+    /* A draw after the frame, an overlay over the presented picture, is no mover of it. */
+    this.inFrame = false;
 
     /*
      * Camera motion blur, built from the camera the frame was *rendered* with.
@@ -8748,6 +8994,7 @@ export class WebGL2Renderer implements RendererApi {
           blend: number;
           periodStart: boolean;
           depthToViewZ: Float32Array;
+          motion: WebGLTexture | null;
         }
       | undefined;
     /*
@@ -8757,6 +9004,11 @@ export class WebGL2Renderer implements RendererApi {
      * reproject through a `previousViewProj` that had never been written.
      */
     const wantsReprojection = blur > 0 || this.temporalJittering;
+    /* The movers' own motion, drawn while last frame's view is still the one kept: motionTarget.ts. */
+    const moved =
+      this.temporalJittering && view !== null && this.hasPreviousView
+        ? this.drawMotionPass(view)
+        : null;
     if (wantsReprojection && view !== null) {
       if (this.hasPreviousView) {
         mat4.invert(this.reprojection, view);
@@ -8791,6 +9043,7 @@ export class WebGL2Renderer implements RendererApi {
         blend: this.temporalHistoryUsable ? TEMPORAL_HISTORY_BLEND : 0,
         periodStart: this.temporalHistory.periodStart,
         depthToViewZ: this.taaDepthToViewZ,
+        motion: moved,
       };
     }
 
@@ -9392,6 +9645,10 @@ export class WebGL2Renderer implements RendererApi {
     this.layerFloats.fill(0);
     this.lookFloats.fill(0);
     this.detailFloats.fill(0);
+    /* Nor a glow that moves or is masked. */
+    this.flowFloats.fill(0);
+    /* Nor an iridescent overlay. */
+    this.iridescentFloats.fill(0);
     this.overlayMaps = null;
     this.overlayTexture = null;
     /* Nor an ambient of its own: the frame's, until a draw asks. See `setAmbientSH`. */
@@ -9570,6 +9827,11 @@ export class WebGL2Renderer implements RendererApi {
     gl.uniform4fv(u['uLayers'] ?? null, this.layerFloats);
     gl.uniform4fv(u['uLayerLooks'] ?? null, this.lookFloats);
     gl.uniform4fv(u['uDetail'] ?? null, this.detailFloats);
+    gl.uniform4fv(u['uEmissiveFlow'] ?? null, this.flowFloats);
+    gl.uniform4fv(u['uIridescence'] ?? null, this.iridescentFloats);
+    /* The frame's decals as last laid, held across passes, and every surface receiving them. */
+    gl.uniform4fv(u['uBaseDecals'] ?? null, this.baseDecalFloats);
+    gl.uniform4f(u['uDecalReceiver'] ?? null, 0, 0, 0, 0);
     /* Neither refracting nor glass, which is every draw that does not say otherwise. See
        `bindSeeThrough` for the four numbers in the one vector. */
     gl.uniform4f(u['uSeeThrough'] ?? null, 0, 0, 0, 0);
@@ -9991,12 +10253,10 @@ export class WebGL2Renderer implements RendererApi {
      */
     tint: Vec3 | null = null,
     /**
-     * Where the mesh was last frame — a `Mover` or a matrix — which this backend takes and ignores.
-     *
-     * Accepted rather than absent so that one scene draws through both renderers unchanged — the
-     * parity rule this repository is built on. Reconstruction is WebGPU's, having no compute stage
-     * here, so there is no motion target for this to be written into, and a mover passed here is
-     * neither read nor advanced.
+     * Where the mesh was last frame, a `Mover` or a matrix, which the temporal resolve follows under
+     * `temporalAa`: a rigid, skinned or rewritten mesh is drawn again into the motion target at the
+     * end of the frame, so its pixels reproject by its own motion and not the camera's alone. See
+     * `motionTarget.ts`; a mover is advanced only where the resolve reads it.
      */
     previousModel: ReadonlyMat4 | Mover | null = null,
   ): void {
@@ -10035,6 +10295,7 @@ export class WebGL2Renderer implements RendererApi {
     if (this.quality.cullDraws && this.occluded(mesh.bounds, model)) return;
     this.drawBudget.ask();
     this.takeMaterial();
+    if (this.followsMotion()) this.recordDrawMotion(mesh, model, previousModel);
     /*
      * Skin under the screen-space blur draws its halves: the frame's, then at once its diffuse's
      * light and its colour, each into the blur's own target.
@@ -10054,6 +10315,147 @@ export class WebGL2Renderer implements RendererApi {
       this.drawMeshHalf(mesh, model, depthLayer, tint, 'albedo');
       this.sceneTarget?.bind();
     }
+  }
+
+  /**
+   * The frame's movers drawn into the motion target against its depth, rasterised through the
+   * jittered matrix every geometry upload took (`viewProjFor`) and moved between the unjittered
+   * ones; null where nothing moved or the frame is multisampled, which keeps the camera's motion
+   * and says so once.
+   */
+  private drawMotionPass(view: ReadonlyMat4): WebGLTexture | null {
+    const target = this.sceneTarget;
+    if (target === null || this.motionPass.recorded === 0) return null;
+    if (target.sampleCount > 1) {
+      if (!this.warnedMotionUnkept) {
+        this.warnedMotionUnkept = true;
+        console.warn(
+          "Renderer: WebGL2's temporal resolve follows the camera's motion alone in a multisampled " +
+            "frame; a mover's own motion is drawn against single-sampled depth.",
+        );
+      }
+      return null;
+    }
+    const depth = target.depthAttachment();
+    if (depth === null) return null;
+    jitterProjection(
+      this.motionJittered,
+      this.sceneMatrix(view),
+      this.temporalJitterX,
+      this.temporalJitterY,
+      Math.max(1, this.gl.drawingBufferWidth),
+      Math.max(1, this.gl.drawingBufferHeight),
+    );
+    return this.motionPass.draw(
+      this.gl,
+      depth,
+      target.frameWidth,
+      target.frameHeight,
+      this.reversedDepth,
+      this.motionJittered,
+      view as Float32Array,
+      this.previousViewProj as Float32Array,
+    );
+  }
+
+  /**
+   * Whether a draw now is one the temporal resolve follows: the profile resolves temporally, this is
+   * the frame's own picture between `beginFrame` and `endFrame`, and not a mirror's, a probe's, a
+   * capture's, a shadow's or the view model's. See `motionTarget.ts`.
+   */
+  private followsMotion(): boolean {
+    return (
+      this.inFrame &&
+      this.quality.temporalAa &&
+      this.sceneTarget !== null &&
+      !this.reflectionPassActive &&
+      !this.probePassActive &&
+      !this.capturePassActive &&
+      !this.shadowPassActive &&
+      !this.viewModelActive
+    );
+  }
+
+  /**
+   * A draw's motion for the resolve, decided as WebGPU's `recordDrawMotion` decides it: a mesh
+   * rewritten this frame by its last positions, with or without a mover; a skinned mover by its last
+   * pose; a rigid one by its last model. A cloth draw keeps the camera's motion, said once.
+   */
+  private recordDrawMotion(
+    mesh: Mesh,
+    model: ReadonlyMat4,
+    previous: ReadonlyMat4 | Mover | null,
+  ): void {
+    const rewritten = mesh.keptPrevious && mesh.changedFrame === this.moverFrame;
+    if (this.cloth !== null && this.skinPaletteSet && mesh.isSkinned) {
+      if (previous !== null && !this.warnedMotionUnkept) {
+        this.warnedMotionUnkept = true;
+        console.warn(
+          "Renderer: a cloth draw's own motion is not followed by WebGL2's temporal resolve; it " +
+            "takes the camera's. WebGPU's reconstruction follows it.",
+        );
+      }
+      return;
+    }
+    if (previous === null) {
+      if (rewritten) this.motionPass.recordDynamic(mesh, model, model);
+      return;
+    }
+    if (!isMover(previous)) {
+      if (rewritten) this.motionPass.recordDynamic(mesh, model, previous);
+      else this.motionPass.recordRigid(mesh, model, previous);
+      return;
+    }
+    const skinned = !rewritten && this.skinPaletteSet && mesh.isSkinned;
+    const verdict = advanceMover(
+      previous,
+      this.moverRenderer,
+      this.moverFrame,
+      model,
+      skinned ? this.paletteData : null,
+    );
+    if (verdict === MOVER_TWICE) {
+      if (!this.warnedMoverTwice) {
+        this.warnedMoverTwice = true;
+        console.warn(
+          'Renderer: a Mover was drawn twice in one frame. A mover is one object; the second draw ' +
+            'records no motion. Give each moving object a mover of its own.',
+        );
+      }
+      return;
+    }
+    if (rewritten) {
+      this.motionPass.recordDynamic(
+        mesh,
+        model,
+        verdict === MOVER_MOTION ? previous.previousModel : model,
+      );
+      return;
+    }
+    if (verdict !== MOVER_MOTION) return;
+    if (skinned) {
+      this.motionPass.recordSkinned(
+        mesh,
+        model,
+        previous.previousModel,
+        /* Each exactly its rig's length, as `advanceMover` keeps them, so neither is sliced. */
+        previous.palette,
+        previous.previousPalette,
+      );
+    } else {
+      this.motionPass.recordRigid(mesh, model, previous.previousModel);
+    }
+  }
+
+  /**
+   * Keep a dynamic mesh's positions before its frame's first rewrite, where the temporal resolve
+   * follows motion: a rewrite before `beginFrame` belongs to the next frame (`frameOfChange`).
+   */
+  private keepPositionsBefore(mesh: Mesh): void {
+    if (!(this.quality.temporalAa && this.sceneTarget !== null)) return;
+    const frame = frameOfChange(this.moverFrame, this.inFrame);
+    if (keepsPrevious(mesh.changedFrame, frame)) mesh.keepPrevious(this.gl);
+    mesh.changedFrame = frame;
   }
 
   /**

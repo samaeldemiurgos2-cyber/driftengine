@@ -1,6 +1,6 @@
 ---
 title: Command-line tools
-description: The baker and its options, comparing two containers, building a distance-field font, the visual gate, the frame audit and the dev servers.
+description: The baker and its options, exporting back to glTF, comparing two containers, a distance-field font, the visual gate, the frame audit and the dev servers.
 covers: ['Tooling']
 ---
 
@@ -58,6 +58,27 @@ step it took and every warning is printed.
 A `.blend` is read directly first. When it holds something only Blender can evaluate, a rig, a
 constraint or a modifier, the baker hands it to Blender's own glTF exporter, and says which route it
 took and why. Without Blender installed, the direct read stands and the approximations are listed.
+
+## The way back out
+
+```sh
+npm run export -- public/model.drft -o model.glb
+```
+
+`export` writes a container as a glTF 2.0 binary, so a baked character or level opens in Blender or
+any glTF editor, is improved there, and bakes back with `bake`. What glTF has a field for goes in that
+field: the meshes, the materials, the skeleton with the bone names a game binds by, every clip by
+name, the attachment points as nodes under the bones they follow, and the lamps. What it has no field
+for, the entity manifest, the colliders, the regions and the meshes drawn many times, rides in the
+file's `extras`, which Blender keeps. Export from Blender with custom properties, punctual lights and
+attributes included, or the lamps and the engine's own vertex values are left out of what it saves.
+
+A container the baker wrote comes back byte for byte. What a modelling tool changed comes back as it
+changed it: an edited material is read from its glTF fields, a moved lamp stands where it was moved,
+and the baker says which of the engine's own values it could not restore. A world built from kit
+pieces and a Gaussian splat capture are refused, since glTF has no form for either, and a picture
+held as raw texels or block-compressed goes out as PNG. In code, `drftToGlb` does the export and
+`bakeModel` is the bake the command runs.
 
 ## Comparing two containers
 

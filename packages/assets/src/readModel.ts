@@ -40,6 +40,7 @@ import { kn5ToMeshes, toDrftNodes } from './kn5.ts';
 import { describeRecognised, recognise } from './recognise.ts';
 import { readBlend } from './blend.ts';
 import type { BlendDecompress } from './blendPacked.ts';
+import type { DrftCarried } from './gltfCarriedScene.ts';
 
 /**
  * Every extension this project reads, in the order a bundle should be picked from.
@@ -171,6 +172,13 @@ export interface ModelImport {
    * reads a non-empty list as the reason to hand the file to Blender when Blender is there.
    */
   approximations?: readonly string[];
+  /**
+   * What a `.drft` exported to glTF carried for the asset as a whole: its name and scale, its entity
+   * manifest, colliders, regions and instance groups, and the chunks nobody edits, read back from the
+   * records `drftToGlb` left. Absent for every other file; the baker writes these back to the chunks
+   * they came from.
+   */
+  carried?: DrftCarried;
 }
 
 function needed(ext: string, capability: string): DrftError {

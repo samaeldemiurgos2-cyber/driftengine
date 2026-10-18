@@ -10,7 +10,7 @@
  */
 import { POINT_SKIN_TEXTURE_UNIT } from '../../lightBudget.ts';
 import type { Mesh } from '../../mesh.ts';
-import { reachOf, type PointSkinData, type PointSkinReach } from '../../pointSkin.ts';
+import { reachOf, widenReach, type PointSkinData, type PointSkinReach } from '../../pointSkin.ts';
 import { compileProgram } from '../../shader.ts';
 
 const POSE_VERT = /* glsl */ `#version 300 es
@@ -80,12 +80,14 @@ export function createPointSkinPose(gl: WebGL2RenderingContext): PointSkinPose {
 
 export class GlPointSkin {
   readonly mesh: Mesh;
-  readonly reach: PointSkinReach;
+  /** Widened by each rewrite, never narrowed: see `widenReach`. */
+  reach: PointSkinReach;
   private readonly count: number;
   private readonly vao: WebGLVertexArrayObject;
+  /** Joints, weights, points and normals, in that order. */
   private readonly buffers: WebGLBuffer[] = [];
-  private readonly joints: WebGLTexture;
-  private readonly width: number;
+  private joints: WebGLTexture;
+  private width: number;
 
   constructor(gl: WebGL2RenderingContext, mesh: Mesh, data: PointSkinData) {
     this.mesh = mesh;
@@ -107,17 +109,37 @@ export class GlPointSkin {
     gl.bindVertexArray(null);
     gl.bindBuffer(gl.ARRAY_BUFFER, null);
 
-    /* One row, four texels a joint, as the skin palette is. */
     this.width = Math.max(1, this.reach.joints * 4);
-    const joints = gl.createTexture();
-    if (joints === null) throw new Error('createTexture failed');
-    this.joints = joints;
-    gl.activeTexture(gl.TEXTURE0 + POINT_SKIN_TEXTURE_UNIT);
-    gl.bindTexture(gl.TEXTURE_2D, joints);
-    gl.texStorage2D(gl.TEXTURE_2D, 1, gl.RGBA32F, this.width, 1);
-    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
-    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
-    gl.bindTexture(gl.TEXTURE_2D, null);
+    this.joints = jointTexture(gl, this.width);
+  }
+
+  /**
+   * Rewrite vertices `first` onward, as many as `data` holds, in place: their four arrays sent at
+   * their offsets and nothing else. A command in the stream like a pose, so the pose after it reads
+   * the rewrite and one before it does not. A joint none of the skin named before grows the joint
+   * texture, which is made again for it; a skin settles at the joints its shapes name, so that is
+   * rare after its first changes.
+   */
+  rewrite(gl: WebGL2RenderingContext, first: number, data: PointSkinData): void {
+    const sent: readonly (readonly [Float32Array, number])[] = [
+      [data.joints, 16],
+      [data.weights, 16],
+      [data.points, 48],
+      [data.normals, 12],
+    ];
+    for (let at = 0; at < sent.length; at++) {
+      const [values, stride] = sent[at] as readonly [Float32Array, number];
+      gl.bindBuffer(gl.ARRAY_BUFFER, this.buffers[at] as WebGLBuffer);
+      gl.bufferSubData(gl.ARRAY_BUFFER, first * stride, values);
+    }
+    gl.bindBuffer(gl.ARRAY_BUFFER, null);
+    this.reach = widenReach(this.reach, data);
+    const width = Math.max(1, this.reach.joints * 4);
+    if (width > this.width) {
+      gl.deleteTexture(this.joints);
+      this.width = width;
+      this.joints = jointTexture(gl, width);
+    }
   }
 
   /** One buffer, read as each `[location, size, stride, offset]` says. */
@@ -170,4 +192,17 @@ export class GlPointSkin {
     gl.deleteTexture(this.joints);
     gl.deleteVertexArray(this.vao);
   }
+}
+
+/** One row, four texels a joint, as the skin palette is. */
+function jointTexture(gl: WebGL2RenderingContext, width: number): WebGLTexture {
+  const joints = gl.createTexture();
+  if (joints === null) throw new Error('createTexture failed');
+  gl.activeTexture(gl.TEXTURE0 + POINT_SKIN_TEXTURE_UNIT);
+  gl.bindTexture(gl.TEXTURE_2D, joints);
+  gl.texStorage2D(gl.TEXTURE_2D, 1, gl.RGBA32F, width, 1);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+  gl.bindTexture(gl.TEXTURE_2D, null);
+  return joints;
 }

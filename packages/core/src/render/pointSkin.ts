@@ -48,9 +48,27 @@ export interface PointSkinReach {
 
 /** Refuse a skin whose arrays disagree with a mesh of `vertices`, or that names a joint past the rest. */
 export function validatePointSkin(data: PointSkinData, vertices: number): void {
-  const fail = (what: string): never => {
-    throw new Error(`point skin: ${what}`);
-  };
+  checkArrays(data, vertices, 'the mesh has');
+  checkJoints(data, 0);
+}
+
+/**
+ * Refuse a rewrite of vertices `first` onward, as many as `data` holds, that does not fit a mesh of
+ * `vertices`: arrays that disagree with each other, a range that is not whole vertices inside the
+ * mesh, or a joint past the rest. Named by the mesh's own vertex numbers.
+ */
+export function validatePointSkinRange(data: PointSkinData, first: number, vertices: number): void {
+  const count = data.weights.length / 4;
+  checkArrays(data, count, 'the weights hold');
+  if (!(Number.isInteger(first) && first >= 0 && first + count <= vertices)) {
+    throw new Error(
+      `point skin: a rewrite of ${count} vertices from vertex ${first} for a mesh of ${vertices}`,
+    );
+  }
+  checkJoints(data, first);
+}
+
+function checkArrays(data: PointSkinData, vertices: number, against: string): void {
   for (const [name, values, width] of [
     ['joints', data.joints, 4],
     ['weights', data.weights, 4],
@@ -58,13 +76,22 @@ export function validatePointSkin(data: PointSkinData, vertices: number): void {
     ['normals', data.normals, 3],
   ] as const) {
     if (values.length !== vertices * width) {
-      fail(`${name} holds ${values.length / width} vertices and the mesh has ${vertices}`);
+      throw new Error(
+        `point skin: ${name} holds ${values.length / width} vertices and ${against} ${vertices}`,
+      );
     }
   }
+}
+
+/** Every joint a whole number below `MAX_JOINTS`; a vertex named as `first` plus its place. */
+function checkJoints(data: PointSkinData, first: number): void {
   for (let at = 0; at < data.joints.length; at++) {
     const joint = data.joints[at] as number;
     if (!(Number.isInteger(joint) && joint >= 0 && joint < MAX_JOINTS)) {
-      fail(`vertex ${Math.floor(at / 4)} names joint ${joint}; a joint is 0 to ${MAX_JOINTS - 1}`);
+      throw new Error(
+        `point skin: vertex ${first + Math.floor(at / 4)} names joint ${joint}; a joint is 0 to ` +
+          `${MAX_JOINTS - 1}`,
+      );
     }
   }
 }
@@ -99,6 +126,38 @@ export function reachOf(data: PointSkinData): PointSkinReach {
     joints,
     reach: reach.slice(0, joints),
     sums: vertices === 0 ? [1, 1] : [least, most],
+  };
+}
+
+/**
+ * A skin's reach after part of it is rewritten with `data`: the farther of the old reach and the
+ * new at each joint, the joints the two name between them, and the widest span of weight sums.
+ *
+ * **It widens and never narrows**, because the vertices the rewrite replaced may have been the
+ * ones that set a joint's reach, and finding out would mean keeping every vertex on the CPU and
+ * reading them all again. A skin that changes shape back and forth settles at the union of its
+ * shapes, which is still a box no posed vertex leaves, and culls a little less than it could. What
+ * would make that wrong is a skin rewritten into ever larger shapes and never back; making it
+ * again with `createPointSkin` measures it afresh.
+ */
+export function widenReach(reach: PointSkinReach, data: PointSkinData): PointSkinReach {
+  const added = reachOf(data);
+  const joints = Math.max(reach.joints, added.joints);
+  const widened = new Float32Array(joints).fill(-1);
+  for (let j = 0; j < joints; j++) {
+    widened[j] = Math.max(
+      j < reach.joints ? (reach.reach[j] as number) : -1,
+      j < added.joints ? (added.reach[j] as number) : -1,
+    );
+  }
+  const vertices = data.weights.length / 4;
+  return {
+    joints,
+    reach: widened,
+    sums:
+      vertices === 0
+        ? reach.sums
+        : [Math.min(reach.sums[0], added.sums[0]), Math.max(reach.sums[1], added.sums[1])],
   };
 }
 

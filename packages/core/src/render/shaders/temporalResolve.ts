@@ -8,14 +8,12 @@
  * which is the trade a browser target wants, where MSAA on a float target is not free and on
  * WebGL2 is not always available at all.
  *
- * **The motion is the camera's, and that is a stated limit rather than an oversight.** The
- * reprojection matrix carries a pixel back through the previous view, which is exact for a static
- * world under a moving camera and wrong for a moving object under a still one. A velocity buffer
- * would fix the second, and it means a second colour attachment on the scene pass and every draw
- * path writing into it — the README carries that as its own gap. What stands in for it here is the
- * neighbourhood clip below, which rejects a history that no longer resembles what is around it;
- * that covers a moving object crossing a background of a different colour, and does not cover one
- * crossing a background of its own.
+ * **The motion is the camera's except where a mover says otherwise.** The reprojection matrix
+ * carries a pixel back through the previous view, which is exact for a static world under a moving
+ * camera and wrong for a moving object under a still one; a mover drawn with its `Mover` writes
+ * where it stood into `uMotion` (`backend/webgl2/motionTarget.ts`), and its pixels take that
+ * instead. The neighbourhood clip below stays for what neither says: a mover the motion pass does
+ * not follow, crossing a background of a different colour.
  *
  * The vertex stage is `FULLSCREEN_VERT`, shared with the occlusion pass, its blur and the rush.
  */
@@ -76,6 +74,14 @@ uniform highp sampler2D uDepth;
  * build. Camera motion blur reads this same matrix and has a test on it.
  */
 uniform mat4 uReprojection;
+/**
+ * Where each mover's surface stood last frame, from the motion pass: the offset to it on screen in
+ * xy, its distance from last frame's eye in z, and 1 in w where a mover wrote it. Read where
+ * \`uMotionOn\` is 1, exactly, never filtered: an offset blended with its neighbour's is a place
+ * neither stood.
+ */
+uniform highp sampler2D uMotion;
+uniform float uMotionOn;
 /** One texel of the target, for walking the neighbourhood. */
 uniform vec2 uTexel;
 /** One on the first frame of the jitter's period, where the anti-flicker compares two periods. */
@@ -253,6 +259,14 @@ void main() {
   }
   vec4 clip = vec4(nearestAt * 2.0 - 1.0, ${glslSceneDepthToNdc('depth')}, 1.0);
   vec4 previous = uReprojection * clip;
+  /* A mover's own motion where it wrote one, at the same nearest surface the camera's is read at. */
+  vec4 moved = vec4(0.0);
+  if (uMotionOn > 0.5) {
+    ivec2 motionSize = textureSize(uMotion, 0);
+    ivec2 motionAt = clamp(ivec2(nearestAt * vec2(motionSize)), ivec2(0), motionSize - 1);
+    moved = texelFetch(uMotion, motionAt, 0);
+  }
+  if (moved.a > 0.5) previous.w = moved.z;
   /* Behind the previous eye: there is no last-frame position to sample. */
   if (previous.w <= 0.0) {
     fragColor = vec4(current, share);
@@ -261,7 +275,9 @@ void main() {
     return;
   }
 
-  vec2 wasUv = vUv + ((previous.xy / previous.w) * 0.5 + 0.5 - nearestAt);
+  vec2 wasUv = moved.a > 0.5
+    ? vUv + moved.xy
+    : vUv + ((previous.xy / previous.w) * 0.5 + 0.5 - nearestAt);
   /*
    * **Off the edge of the last frame is a disocclusion**, and the honest answer is this frame's
    * colour rather than a clamped sample of the border, which would drag one row of pixels inward

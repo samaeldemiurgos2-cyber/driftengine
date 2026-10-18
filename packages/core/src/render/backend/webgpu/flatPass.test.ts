@@ -183,7 +183,7 @@ test('every variant that can bend declares the wind, and the instanced one decla
  * module lacks fails validation and drops the frame, the permutations without shadows included,
  * which read the glass switch nowhere. The models and halves are generated off, the lit features on.
  */
-test('EVERY LIT VARIANT DECLARES THE TWENTY-TWO SWITCHES ITS PIPELINES SET', () => {
+test('EVERY LIT VARIANT DECLARES THE TWENTY-FIVE SWITCHES ITS PIPELINES SET', () => {
   const variants = Object.entries(FLAT_FRAG_WGSL);
   expect(variants.length).toBe(16);
   const switches = [
@@ -233,6 +233,13 @@ test('EVERY LIT VARIANT DECLARES THE TWENTY-TWO SWITCHES ITS PIPELINES SET', () 
     expect(wgsl, `${variant}: SURFACE_DETAIL`).toMatch(
       /@id\(21\) override SURFACE_DETAIL: bool = true;/,
     );
+    expect(wgsl, `${variant}: EMISSIVE_FLOW`).toMatch(
+      /@id\(22\) override EMISSIVE_FLOW: bool = true;/,
+    );
+    expect(wgsl, `${variant}: IRIDESCENT_OVERLAY`).toMatch(
+      /@id\(23\) override IRIDESCENT_OVERLAY: bool = true;/,
+    );
+    expect(wgsl, `${variant}: BASE_DECALS`).toMatch(/@id\(24\) override BASE_DECALS: bool = true;/);
     const bindings = (FLAT_BINDINGS.flatFrag as Record<string, { overrides?: unknown }>)[variant];
     expect(bindings?.overrides, variant).toEqual({
       GLASS_SHADOWS: 0,
@@ -257,6 +264,9 @@ test('EVERY LIT VARIANT DECLARES THE TWENTY-TWO SWITCHES ITS PIPELINES SET', () 
       LAYERED: 19,
       LAYER_LOOKS: 20,
       SURFACE_DETAIL: 21,
+      EMISSIVE_FLOW: 22,
+      IRIDESCENT_OVERLAY: 23,
+      BASE_DECALS: 24,
     });
   }
 });
@@ -322,6 +332,9 @@ test('A LIT PIPELINE SETS ALL ITS SWITCHES, clustering from the profile and the 
     '19': 0,
     '20': 0,
     '21': 0,
+    '22': 0,
+    '23': 0,
+    '24': 0,
   };
   expect(descriptors[0]?.fragment?.constants).toEqual({
     '0': 0,
@@ -354,6 +367,15 @@ test('A LIT PIPELINE SETS ALL ITS SWITCHES, clustering from the profile and the 
   /* And a material's tiled detail, by 21. */
   await cache.enable('SURFACE_DETAIL');
   expect(descriptors[6]?.fragment?.constants?.['21']).toBe(1);
+  /* And a material's glow moved and masked, by 22. */
+  await cache.enable('EMISSIVE_FLOW');
+  expect(descriptors[7]?.fragment?.constants?.['22']).toBe(1);
+  /* And a material's iridescent overlay, by 23. */
+  await cache.enable('IRIDESCENT_OVERLAY');
+  expect(descriptors[8]?.fragment?.constants?.['23']).toBe(1);
+  /* And the frame's base decals, by 24. */
+  await cache.enable('BASE_DECALS');
+  expect(descriptors[9]?.fragment?.constants?.['24']).toBe(1);
 });
 
 /*
